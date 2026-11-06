@@ -45,3 +45,37 @@ def test_metadata_matches_package_version() -> None:
     assert general["qgisMinimumVersion"].startswith("4.")
     for key in ("name", "description", "about", "author", "email", "repository"):
         assert general[key]
+
+
+def test_reopening_a_project_rebuilds_geoh5_layers(
+    geoh5_file, tmp_path, qgis_new_project
+) -> None:
+    import time
+
+    from qgis.core import QgsProject
+    from qgis.PyQt.QtCore import QCoreApplication
+
+    from geoh5_qgis.layers import load_object_layers
+    from geoh5_qgis.reader import list_objects, open_workspace
+
+    project = QgsProject.instance()
+    with open_workspace(geoh5_file) as ws:
+        uid = next(o.uid for o in list_objects(ws) if o.name == "pts")
+    project.addMapLayers(load_object_layers(geoh5_file, uid))
+    qgz = str(tmp_path / "p.qgz")
+    project.write(qgz)
+    project.clear()
+
+    iface = MagicMock()
+    plugin = geoh5_qgis.classFactory(iface)
+    plugin.initGui()
+    try:
+        project.read(qgz)
+        (pts,) = project.mapLayersByName("pts")
+        deadline = time.monotonic() + 60
+        while pts.featureCount() == 0 and time.monotonic() < deadline:
+            QCoreApplication.processEvents()
+            time.sleep(0.01)
+        assert pts.featureCount() == 4
+    finally:
+        plugin.unload()

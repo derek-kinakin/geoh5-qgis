@@ -54,10 +54,15 @@ from geoh5_qgis.reader import (
     read_grid2d_frame,
     read_vertices,
 )
+from geoh5_qgis.sources import register_generated
 
 PATH_PROPERTY = "geoh5/path"
 UID_PROPERTY = "geoh5/uid"
 ROLE_PROPERTY = "geoh5/role"
+# Identifies each of an object's layers (main, vertices, collars, traces,
+# intervals/<table>), so a saved project can be matched to rebuilt layers.
+PART_PROPERTY = "geoh5/part"
+MAIN_PART = "main"
 VERTEX_ROLE = "vertices"
 VERTEX_LAYER_SUFFIX = " vertices"
 VSIMEM_DIR = "/vsimem/geoh5_qgis"
@@ -105,6 +110,12 @@ def load_object_layers(
     for layer in layers:
         layer.setCustomProperty(PATH_PROPERTY, str(path))
         layer.setCustomProperty(UID_PROPERTY, object_uid)
+        if layer.customProperty(PART_PROPERTY) is None:
+            role = layer.customProperty(ROLE_PROPERTY)
+            layer.setCustomProperty(PART_PROPERTY, role or MAIN_PART)
+        if layer.source().startswith(VSIMEM_DIR):
+            part = str(layer.customProperty(PART_PROPERTY))
+            register_generated(layer.source(), str(path), object_uid, part)
     return layers
 
 
@@ -512,6 +523,7 @@ def _interval_layer(
         "LineStringZ", name, crs, geometries, _prepend(fixed, table.columns)
     )
     layer.setCustomProperty(ROLE_PROPERTY, "intervals")
+    layer.setCustomProperty(PART_PROPERTY, f"intervals/{table.name}")
     return layer
 
 

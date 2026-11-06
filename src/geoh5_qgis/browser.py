@@ -15,7 +15,6 @@ from pathlib import Path
 
 from qgis.core import (
     Qgis,
-    QgsApplication,
     QgsDataCollectionItem,
     QgsDataItem,
     QgsDataItemProvider,
@@ -27,10 +26,8 @@ from qgis.core import (
     QgsTask,
 )
 from qgis.gui import QgsCustomDropHandler, QgsDataItemGuiProvider
-from qgis.PyQt.QtCore import QCoreApplication
 from qgis.PyQt.QtGui import QAction
 
-from geoh5_qgis.layers import load_object_layers
 from geoh5_qgis.reader import (
     CURVE,
     DRILLHOLES,
@@ -47,8 +44,7 @@ from geoh5_qgis.reader import (
     read_tree,
     tree_objects,
 )
-
-_RUNNING_TASKS: set[QgsTask] = set()
+from geoh5_qgis.tasks import LoadResult, load_in_background, try_load
 
 PROVIDER_KEY = "geoh5"
 URI_SEPARATOR = "|"
@@ -78,7 +74,7 @@ def add_objects(
         The added layers (an object can give more than one, e.g. a curve and
         its vertices), and one error message per object that failed.
     """
-    results = [_try_load(path, uid) for uid in uids]
+    results = [try_load(path, uid) for uid in uids]
     layers = [layer for r in results if isinstance(r, list) for layer in r]
     errors = [r for r in results if isinstance(r, str)]
     project.addMapLayers(layers)
@@ -107,49 +103,19 @@ def add_objects_in_background(
         The started task.
     """
 
-    def finished(exception, result=None) -> None:
-        _RUNNING_TASKS.discard(task)
-        if exception is not None:
-            _report([f"{Path(path).name}: {exception}"], message_bar)
-            return
-        if result is None:  # cancelled
-            return
-        layers, errors = result
-        project.addMapLayers(layers)
-        _report(errors, message_bar)
+    def loaded(results: list[LoadResult]) -> None:
+        project.addMapLayers(
+            [layer for *_, r in results if not isinstance(r, str) for layer in r]
+        )
+        _report([r for *_, r in results if isinstance(r, str)], message_bar)
 
     count = f"{len(uids)} object{'s' if len(uids) != 1 else ''}"
-    task = QgsTask.fromFunction(
+    return load_in_background(
         f"Loading {count} from {Path(path).name}",
-        _load_in_task,
-        str(path),
-        list(uids),
-        on_finished=finished,
+        [(str(path), uid) for uid in uids],
+        loaded,
+        lambda message: _report([f"{Path(path).name}: {message}"], message_bar),
     )
-    _RUNNING_TASKS.add(task)  # keep the Python wrapper alive until it finishes
-    QgsApplication.taskManager().addTask(task)
-    return task
-
-
-def _load_in_task(
-    task: QgsTask, path: str, uids: list[str]
-) -> tuple[list[QgsMapLayer], list[str]] | None:
-    """Task body (worker thread): build layers and hand them to the main thread."""
-    main_thread = QCoreApplication.instance().thread()
-    layers: list[QgsMapLayer] = []
-    errors: list[str] = []
-    for index, uid in enumerate(uids, start=1):
-        if task.isCanceled():
-            return None
-        result = _try_load(path, uid)
-        if isinstance(result, str):
-            errors.append(result)
-        else:
-            for layer in result:
-                layer.moveToThread(main_thread)
-            layers.extend(result)
-        task.setProgress(100.0 * index / len(uids))
-    return layers, errors
 
 
 def object_uri(path: str | Path, uid: str) -> str:
@@ -176,13 +142,6 @@ def parse_object_uri(uri: str) -> tuple[str, str]:
     """
     path, _, uid = uri.rpartition(URI_SEPARATOR)
     return path, uid
-
-
-def _try_load(path: str | Path, uid: str) -> list[QgsMapLayer] | str:
-    try:
-        return load_object_layers(path, uid)
-    except (KeyError, ValueError, RuntimeError, FileNotFoundError) as exc:
-        return f"{Path(path).name} {uid}: {exc}"
 
 
 def _report(errors: list[str], message_bar) -> None:
