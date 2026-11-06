@@ -28,8 +28,12 @@ from geoh5_qgis.layers import (
 )
 from geoh5_qgis.sources import parse_token, token_for
 from geoh5_qgis.tasks import LoadResult, load_in_background, try_load
+from geoh5_qgis.tempfiles import files_of, remove_files
 
 MESSAGE_TITLE = "geoh5"
+
+# Sources rebuilt by preprocess_source while the current project was read.
+_FRESH_SOURCES: set[str] = set()
 
 # (geoh5 path, object UID) -> the project's layers built from that object.
 Targets = dict[tuple[str, str], list[QgsMapLayer]]
@@ -115,7 +119,10 @@ def preprocess_source(source: str) -> str:
     if isinstance(rebuilt, str):
         return source
     match = next((layer for layer in rebuilt if _part(layer) == part), None)
-    return match.source() if match is not None else source
+    if match is None:
+        return source
+    _FRESH_SOURCES.add(match.source())
+    return match.source()
 
 
 def geoh5_layers(project: QgsProject) -> Targets:
@@ -133,7 +140,14 @@ def geoh5_layers(project: QgsProject) -> Targets:
         uid = layer.customProperty(UID_PROPERTY)
         if path and uid:
             targets.setdefault((str(path), str(uid)), []).append(layer)
-    return targets
+    # Objects whose layers were all just rebuilt by preprocess_source are current.
+    fresh = {
+        key
+        for key, layers in targets.items()
+        if all(layer.source() in _FRESH_SOURCES for layer in layers)
+    }
+    _FRESH_SOURCES.clear()
+    return {key: layers for key, layers in targets.items() if key not in fresh}
 
 
 def transplant(target: QgsMapLayer, source: QgsMapLayer) -> str | None:
@@ -211,6 +225,7 @@ def _field_signature(layer: QgsVectorLayer) -> list[tuple[str, int]]:
 
 def _replace_source(target: QgsMapLayer, source: QgsMapLayer) -> None:
     crs = target.crs()
+    old_files = files_of(target.source())
     target.setDataSource(
         source.source(),
         target.name(),
@@ -224,6 +239,7 @@ def _replace_source(target: QgsMapLayer, source: QgsMapLayer) -> None:
         target.dataProvider().addDataset(uri)  # QGIS skips ones already present
     if source.renderer3D() is not None and target.renderer3D() is None:
         target.setRenderer3D(source.renderer3D().clone())
+    remove_files(old_files)  # the old provider has released them
 
 
 def _report(errors: list[str], message_bar) -> None:

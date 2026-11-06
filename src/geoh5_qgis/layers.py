@@ -1,10 +1,10 @@
-"""Build in-memory QGIS layers from geoh5 objects.
+"""Build QGIS layers from geoh5 objects.
 
 Vector objects become memory-provider layers. Surfaces with vertex data become
-``mesh_memory`` mesh layers instead. Grid2D objects become a GeoTIFF in
-GDAL's in-memory filesystem (``/vsimem``) opened with the ``gdal`` provider. Each
-layer records its source file and object UID as custom properties, so the geoh5
-file stays the source of truth.
+``mesh_memory`` mesh layers instead. Grid2D and GeoImage objects become
+GeoTIFF/VRT files in the session temp folder (see tempfiles.py), opened with the
+``gdal`` provider. Each layer records its source file, object UID and part as
+custom properties, so the geoh5 file stays the source of truth.
 """
 
 import itertools
@@ -55,6 +55,7 @@ from geoh5_qgis.reader import (
     read_vertices,
 )
 from geoh5_qgis.sources import register_generated
+from geoh5_qgis.tempfiles import is_temp_file, new_path
 
 PATH_PROPERTY = "geoh5/path"
 UID_PROPERTY = "geoh5/uid"
@@ -65,7 +66,6 @@ PART_PROPERTY = "geoh5/part"
 MAIN_PART = "main"
 VERTEX_ROLE = "vertices"
 VERTEX_LAYER_SUFFIX = " vertices"
-VSIMEM_DIR = "/vsimem/geoh5_qgis"
 MESH_MEMORY_PROVIDER = "mesh_memory"
 MESH_3D_RENDERER = "mesh"
 ELEVATION_DATASET = "Z"
@@ -75,8 +75,6 @@ WKB_POINT_Z = 1001
 WKB_LINESTRING_Z = 1002
 WKB_POLYGON_Z = 1003
 WKB_MULTIPOLYGON_Z = 1006
-
-_raster_counter = itertools.count()
 
 
 def load_object_layers(
@@ -113,7 +111,7 @@ def load_object_layers(
         if layer.customProperty(PART_PROPERTY) is None:
             role = layer.customProperty(ROLE_PROPERTY)
             layer.setCustomProperty(PART_PROPERTY, role or MAIN_PART)
-        if layer.source().startswith(VSIMEM_DIR):
+        if is_temp_file(layer.source()):
             part = str(layer.customProperty(PART_PROPERTY))
             register_generated(layer.source(), str(path), object_uid, part)
     return layers
@@ -439,7 +437,7 @@ def grid2d_layer(
         crs: CRS string, or None to leave it unset.
 
     Returns:
-        A raster layer backed by a GeoTIFF in /vsimem.
+        A raster layer backed by a GeoTIFF in the session temp folder.
 
     Raises:
         ValueError: If the grid is dipping/vertical or has no numeric data.
@@ -451,7 +449,7 @@ def grid2d_layer(
         )
     if not bands:
         raise ValueError(f"Grid2D {name!r} has no numeric cell data to display")
-    path = f"{VSIMEM_DIR}/{uid.strip('{}')}_{next(_raster_counter)}.tif"
+    path = str(new_path(uid.strip("{}"), ".tif"))
     _write_grid_tiff(path, frame, bands, crs)
     layer = QgsRasterLayer(path, name, "gdal")
     if crs:
@@ -546,9 +544,9 @@ def geoimage_layer(
 ) -> QgsRasterLayer:
     """Build a raster layer for a horizontal GeoImage.
 
-    The embedded image file is placed in /vsimem and wrapped in a VRT that
-    carries the corner-derived geotransform and CRS, so GDAL decodes the
-    original JPEG/PNG/TIFF on demand.
+    The embedded image file is written to the session temp folder and wrapped
+    in a VRT that carries the corner-derived geotransform and CRS, so GDAL
+    decodes the original JPEG/PNG/TIFF on demand.
 
     Args:
         name: Layer name.
@@ -559,16 +557,16 @@ def geoimage_layer(
         crs: CRS string, or None to leave it unset.
 
     Returns:
-        A raster layer backed by a VRT in /vsimem.
+        A raster layer backed by a VRT in the session temp folder.
 
     Raises:
         RuntimeError: If GDAL cannot decode the image.
     """
-    stem = f"{VSIMEM_DIR}/{uid.strip('{}')}_{next(_raster_counter)}"
-    image_path, vrt_path = f"{stem}{suffix}", f"{stem}.vrt"
+    image_path = new_path(uid.strip("{}"), suffix)
+    vrt_path = str(image_path.with_suffix(".vrt"))
+    image_path.write_bytes(image_bytes)
     with gdal.ExceptionMgr(useExceptions=True):
-        gdal.FileFromMemBuffer(image_path, image_bytes)
-        source = gdal.Open(image_path)
+        source = gdal.Open(str(image_path))
         vrt = gdal.Translate(vrt_path, source, format="VRT")
         vrt.SetGeoTransform(
             geoimage_geotransform(corners, source.RasterXSize, source.RasterYSize)

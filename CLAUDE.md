@@ -65,6 +65,10 @@ Background research and decisions: `docs/research/geoh5-qgis-plugin-research.md`
   desurveys those with minimum curvature (stations densified every 50 m, as GA/geoh5py
   do). Interval tables are property groups of type "Interval table"; their first two
   properties are FROM and TO.
+- Rasters (Grid2D, GeoImage) are files in a per-session temp folder (`tempfiles.py`),
+  not /vsimem: GDAL Processing tools run as subprocesses and silently produce nothing
+  from /vsimem inputs. Files are deleted on layer removal and plugin unload; folders
+  untouched for 7 days are swept at start (another QGIS may be running).
 - Saved projects: memory vector layers reopen empty and generated sources (/vsimem,
   temp files) are gone. The plugin rebuilds geoh5 layers on `readProject`
   (`restore.py`, matched by `geoh5/path`, `geoh5/uid`, `geoh5/part`), and saves

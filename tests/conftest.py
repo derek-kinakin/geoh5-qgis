@@ -121,6 +121,31 @@ def geoh5_file(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return path
 
 
+@pytest.fixture(scope="session", autouse=True)
+def remove_session_temp_files():
+    """Delete every plugin temp folder created during the test run.
+
+    Layers are released first, since Windows will not delete open files.
+    """
+    import gc
+    import shutil
+    import tempfile
+    import time
+
+    from qgis.core import QgsProject
+
+    from geoh5_qgis import tempfiles
+
+    started = time.time() - 1
+    yield
+    QgsProject.instance().clear()
+    gc.collect()
+    tempfiles.cleanup_session()
+    for folder in Path(tempfile.gettempdir()).glob(f"{tempfiles.PREFIX}*"):
+        if folder.is_dir() and folder.stat().st_ctime >= started:
+            shutil.rmtree(folder, ignore_errors=True)
+
+
 def write_tree_file(path: Path) -> Path:
     """Root: Empty/, Folder A/{Sub/{line_b}, pts_a}, top_pts."""
     with Workspace.create(path) as ws:

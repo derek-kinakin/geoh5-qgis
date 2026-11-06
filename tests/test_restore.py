@@ -8,12 +8,12 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 from geoh5py.workspace import Workspace as Geoh5pyWorkspace
-from osgeo import gdal
 from qgis.core import QgsProject
 from qgis.PyQt.QtCore import QCoreApplication
 from qgis.PyQt.QtGui import QColor
 
-from geoh5_qgis.layers import PART_PROPERTY, VSIMEM_DIR, load_object_layers
+from geoh5_qgis import tempfiles
+from geoh5_qgis.layers import PART_PROPERTY, load_object_layers
 from geoh5_qgis.reader import list_objects, open_workspace
 from geoh5_qgis.restore import restore_project, restore_project_in_background
 
@@ -44,8 +44,7 @@ def save_and_reopen(project: QgsProject, path: Path, tmp_path: Path) -> None:
     qgz = str(tmp_path / "saved.qgz")
     assert project.write(qgz)
     project.clear()
-    for name in gdal.ReadDir(VSIMEM_DIR) or []:  # what a restart would do
-        gdal.Unlink(f"{VSIMEM_DIR}/{name}")
+    tempfiles.cleanup_session()  # what a restart would do
     assert project.read(qgz)
 
 
@@ -149,8 +148,8 @@ def test_generated_rasters_reopen_valid_without_a_bad_layer_prompt(
     save_and_reopen(project, geoh5_copy, tmp_path)
     with zipfile.ZipFile(tmp_path / "saved.qgz") as archive:
         xml = archive.read(next(n for n in archive.namelist() if n.endswith(".qgs")))
-    assert b"geoh5:" in xml  # token saved instead of the /vsimem path
-    assert b"/vsimem/" not in xml
+    assert b"geoh5:" in xml  # token saved instead of the temp file path
+    assert tempfiles.PREFIX.encode() not in xml
     # Valid straight after reading, before any background rebuild.
     grid = layer(project, "grid")
     assert grid.isValid()
