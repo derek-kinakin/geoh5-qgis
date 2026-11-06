@@ -86,6 +86,7 @@ def add_objects_in_background(
     uids: list[str],
     project: QgsProject,
     message_bar=None,
+    as_polygons: bool = False,
 ) -> QgsTask:
     """Load geoh5 objects in a background task, then add them to a project.
 
@@ -98,6 +99,7 @@ def add_objects_in_background(
         uids: Object group names to load.
         project: Project to add the layers to.
         message_bar: A QgsMessageBar for errors, or None.
+        as_polygons: Load surfaces as triangle polygons instead of meshes.
 
     Returns:
         The started task.
@@ -112,7 +114,7 @@ def add_objects_in_background(
     count = f"{len(uids)} object{'s' if len(uids) != 1 else ''}"
     return load_in_background(
         f"Loading {count} from {Path(path).name}",
-        [(str(path), uid) for uid in uids],
+        [(str(path), uid, as_polygons) for uid in uids],
         loaded,
         lambda message: _report([f"{Path(path).name}: {message}"], message_bar),
     )
@@ -297,6 +299,14 @@ class Geoh5DataItemGuiProvider(QgsDataItemGuiProvider):
             action = QAction(label, menu)
             action.triggered.connect(lambda: _add_items(objects, context))
             menu.addAction(action)
+            surfaces = [i for i in objects if i.kind == SURFACE]
+            if surfaces:
+                plural = "s" if len(surfaces) > 1 else ""
+                polygons = QAction(f"Add Surface{plural} as Polygons", menu)
+                polygons.triggered.connect(
+                    lambda: _add_items(surfaces, context, as_polygons=True)
+                )
+                menu.addAction(polygons)
         elif isinstance(item, Geoh5GroupItem) and item.loadable_uids():
             action = QAction("Add All Objects in Group to Project", menu)
             action.triggered.connect(lambda: _add_group(item, context))
@@ -320,13 +330,15 @@ class Geoh5DropHandler(QgsCustomDropHandler):
         )
 
 
-def _add_items(items: list[Geoh5ObjectItem], context) -> None:
+def _add_items(
+    items: list[Geoh5ObjectItem], context, as_polygons: bool = False
+) -> None:
     by_file: dict[str, list[str]] = {}
     for item in items:
         by_file.setdefault(item.file_path, []).append(item.uid)
     for path, uids in by_file.items():
         add_objects_in_background(
-            path, uids, QgsProject.instance(), context.messageBar()
+            path, uids, QgsProject.instance(), context.messageBar(), as_polygons
         )
 
 

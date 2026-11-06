@@ -125,26 +125,41 @@ def ring_coords(polygon) -> list[tuple[float, float, float]]:
 FIRST_TRIANGLE = [tuple(SURFACE_VERTICES[i]) for i in [0, 1, 2, 0]]
 
 
-def test_surface_without_cell_data_is_one_multipolygon(geoh5_file: Path) -> None:
-    layer = load_object_layer(geoh5_file, uid_of(geoh5_file, "topo"))
-    assert layer.wkbType() == QgsWkbTypes.Type.MultiPolygonZ
-    assert layer.featureCount() == 1
-    assert len(layer.fields()) == 0
-    multi = next(layer.getFeatures()).geometry().constGet()
-    assert multi.numGeometries() == len(SURFACE_CELLS)
-    assert ring_coords(multi.geometryN(0)) == FIRST_TRIANGLE
+@pytest.mark.parametrize("name", ["topo", "zoned"])
+def test_every_surface_is_a_mesh_by_default(geoh5_file: Path, name: str) -> None:
+    layer = load_object_layer(geoh5_file, uid_of(geoh5_file, name))
+    assert isinstance(layer, QgsMeshLayer)
+    assert layer.isValid()
+    groups = mesh_groups(layer)
+    assert next(iter(groups)) == "Bed Elevation"  # default colouring
+    if name == "zoned":  # triangle data becomes a face dataset
+        on_faces = QgsMeshDatasetGroupMetadata.DataType.DataOnFaces
+        assert groups["zone"] == (on_faces, [7.0, 8.0])
 
 
-def test_surface_with_cell_data_has_one_feature_per_triangle(
-    geoh5_file: Path,
-) -> None:
-    layer = load_object_layer(geoh5_file, uid_of(geoh5_file, "zoned"))
+def test_surface_as_polygons_has_elevation_fields(geoh5_file: Path) -> None:
+    (layer,) = load_object_layers(
+        geoh5_file, uid_of(geoh5_file, "zoned"), as_polygons=True
+    )
     assert layer.wkbType() == QgsWkbTypes.Type.PolygonZ
     assert layer.featureCount() == len(SURFACE_CELLS)
-    assert [r["zone"] for r in attribute_rows(layer)] == [7.0, 8.0]
+    assert layer.customProperty("geoh5/part") == "polygons"
+    rows = attribute_rows(layer)
+    z = SURFACE_VERTICES[:, 2][SURFACE_CELLS]  # per-triangle corner elevations
+    assert [r["z_min"] for r in rows] == pytest.approx(z.min(axis=1).tolist())
+    assert [r["z_max"] for r in rows] == pytest.approx(z.max(axis=1).tolist())
+    assert [r["z_mean"] for r in rows] == pytest.approx(z.mean(axis=1).tolist())
+    assert [r["zone"] for r in rows] == [7.0, 8.0]
     assert ring_coords(next(layer.getFeatures()).geometry().constGet()) == (
         FIRST_TRIANGLE
     )
+
+
+def test_polygons_option_only_changes_surfaces(geoh5_file: Path) -> None:
+    (points,) = load_object_layers(
+        geoh5_file, uid_of(geoh5_file, "pts"), as_polygons=True
+    )
+    assert points.wkbType() == QgsWkbTypes.Type.PointZ
 
 
 def assert_raster_matches_geoh5py(path: Path, name: str, data_name: str) -> None:
@@ -336,3 +351,43 @@ def test_mesh_channels_named_like_coordinates_do_not_clash() -> None:
     layer.dataProvider().populateMesh(native)
     assert native.vertex(0).z() == SURFACE_VERTICES[0, 2]  # coordinates intact
     assert "z_2" in mesh_groups(layer)
+
+
+def surface_profile_heights(layer) -> list[float]:
+    """Heights from QGIS's elevation profile engine along y=0.5 across the surface."""
+    from qgis.core import (
+        Qgis,
+        QgsGeometry,
+        QgsLineString,
+        QgsPoint,
+        QgsProfileRequest,
+    )
+
+    request = QgsProfileRequest(QgsLineString([QgsPoint(0.1, 0.5), QgsPoint(0.9, 0.5)]))
+    request.setCrs(layer.crs())
+    request.setTolerance(0.01)
+    generator = layer.createProfileGenerator(request)
+    assert generator.generateProfile()
+    results = generator.takeResults()
+    if isinstance(layer, QgsMeshLayer):
+        return list(results.distanceToHeightMap().values())
+    features = results.asFeatures(Qgis.ProfileExportType.Features3D)
+    return [p.z() for f in features for p in QgsGeometry(f.geometry).vertices()]
+
+
+@pytest.mark.parametrize("as_polygons", [False, True])
+def test_surfaces_work_with_the_elevation_profile_tool(
+    geoh5_file: Path, as_polygons: bool
+) -> None:
+    (layer,) = load_object_layers(
+        geoh5_file,
+        uid_of(geoh5_file, "topo"),
+        crs="EPSG:32611",
+        as_polygons=as_polygons,
+    )
+    heights = surface_profile_heights(layer)
+    assert heights
+    # The fixture surface rises from z=0 to z=1.5; along y=0.5, x=0.1..0.9 the
+    # surface z is 0.5*x + y, i.e. between 0.55 and 0.95.
+    assert min(heights) == pytest.approx(0.55, abs=0.05)
+    assert max(heights) == pytest.approx(0.95, abs=0.05)

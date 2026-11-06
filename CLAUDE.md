@@ -44,15 +44,19 @@ Background research and decisions: `docs/research/geoh5-qgis-plugin-research.md`
 
 - Memory vector layers default to EPSG:4326 when the URI has no `crs=`; set an empty
   `QgsCoordinateReferenceSystem()` when the geoh5 object has no CRS.
-- Surfaces with vertex data are binary PLY files (written with numpy) opened with the
+- Surfaces load as binary PLY mesh files by default (written with numpy) opened with the
   `mdal` provider: real vertex Z, MDAL adds a "Bed Elevation" dataset, other PLY
   properties become vertex/face datasets. Do not use `mesh_memory` (x,y only, no Z,
   datasets cannot be saved, whole mesh stored in the project file). PLY property names
   use non-breaking spaces for spaces (`mesh_dataset_name`). Renderer settings getters
   return copies: set them back after editing.
 - TIN geometry (`TINZ`) works in memory in 4.2.3 but QGIS cannot save it to GPKG,
-  FlatGeobuf, GeoJSON, Shapefile or DXF ("Feature geometry not imported"), so surfaces
-  without vertex data use a single MultiPolygonZ feature instead.
+  FlatGeobuf, GeoJSON, Shapefile or DXF ("Feature geometry not imported"). A single
+  MultiPolygonZ surface can only be coloured by elevation with a per-part data-defined
+  expression (@geometry_part_num), ~2.6 s per redraw for 88k triangles, so the vector
+  option ("Add Surface as Polygons", part "polygons") is one PolygonZ per triangle with
+  z_min/z_max/z_mean fields. For polygons, read profile results with
+  `asFeatures(Features3D)`; `distanceToHeightMap()` is NaN and `Profile2D` crashed PyQGIS.
 - Rotated rasters are drawn through an on-the-fly north-up warp; test raster placement
   with GDAL on the file, not by sampling the QGIS layer.
 - GeoImage image files are HDF5 **opaque** datasets that GDAL multidim cannot open.

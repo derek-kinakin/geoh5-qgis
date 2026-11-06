@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-from qgis.core import Qgis, QgsProject, QgsTask
+from qgis.core import Qgis, QgsProject, QgsTask, QgsWkbTypes
 from qgis.gui import QgsDataItemGuiContext
 from qgis.PyQt.QtCore import QCoreApplication
 
@@ -240,3 +240,33 @@ def test_background_load_of_a_mesh_and_raster(
     assert all(layer.isValid() for layer in project.mapLayers().values())
     (mesh,) = project.mapLayersByName("shaded")
     assert mesh.renderer3D() is not None  # survives the worker-thread build
+
+
+def context_menu(item, selected):
+    """The Browser context menu for an item (keep it alive while using actions)."""
+    from qgis.PyQt.QtWidgets import QMenu
+
+    menu = QMenu()
+    Geoh5DataItemGuiProvider().populateContextMenu(
+        item, menu, selected, QgsDataItemGuiContext()
+    )
+    return menu
+
+
+def actions_of(menu) -> dict:
+    return {action.text(): action for action in menu.actions()}
+
+
+def test_surfaces_offer_add_as_polygons(geoh5_file: Path, project: QgsProject) -> None:
+    items = object_items(geoh5_file)
+    surface_menu = context_menu(items["topo"], [items["topo"]])
+    surface_actions = actions_of(surface_menu)
+    assert "Add Surface as Polygons" in surface_actions
+    point_actions = actions_of(context_menu(items["pts"], [items["pts"]]))
+    assert not any("Polygons" in text for text in point_actions)
+
+    surface_actions["Add Surface as Polygons"].trigger()
+    assert layer_names_when_loaded(project, 1) == ["topo"]
+    (layer,) = project.mapLayersByName("topo")
+    assert layer.wkbType() == QgsWkbTypes.Type.PolygonZ
+    assert "z_mean" in layer.fields().names()

@@ -1,7 +1,7 @@
 # geoh5-qgis
 
 A QGIS 4.x plugin for browsing `.geoh5` (GEOSCIENCE ANALYST) files and adding their
-objects to a QGIS project as in-memory layers.
+objects to a QGIS project as layers, with the geoh5 file as the source of truth.
 
 **Status:** early development (experimental).
 
@@ -12,10 +12,12 @@ objects to a QGIS project as in-memory layers.
 - Right-clicking a file or group gives **Add All Supported Objects to Project** or
   **Add All Objects in Group to Project**.
 - Supported objects: Points, Curve, Surface, horizontal Grid2D, GeoImage and drillhole
-  groups (collars, traces and interval tables). Surfaces with vertex
-  data load as mesh layers (with real elevation) coloured by elevation; the other
-  surfaces load as vector
-  layers.
+  groups (collars, traces and interval tables).
+- Surfaces load as mesh layers with real vertex elevations, coloured by elevation
+  ("Bed Elevation"); they work with the mesh renderer, Processing (contours, rasterize),
+  the Elevation Profile tool and 3D views. Right-click a surface and choose **Add
+  Surface as Polygons** for a vector layer instead: one PolygonZ per triangle with
+  `z_min`, `z_max` and `z_mean` fields (for graduated styling) plus the triangle data.
 
 The plugin reads geoh5 with GDAL, which ships with QGIS, so users don't need to install
 any extra Python packages.

@@ -73,7 +73,7 @@ def test_restore_refills_the_same_layers(geoh5_copy, project, tmp_path) -> None:
     assert pts.renderer().symbol().color().name() == "#123456"  # style kept
     assert layer(project, "line").featureCount() == 3
     assert layer(project, "line vertices").featureCount() == 5
-    assert layer(project, "topo").featureCount() == 1
+    assert layer(project, "topo").isValid()  # mesh by default
     grid = layer(project, "grid")
     assert grid.isValid()
     assert grid.bandCount() == 1
@@ -191,3 +191,19 @@ def test_old_projects_without_parts_match_interval_layers_by_name(
     project.read(qgz)
     assert restore_project(project) == []
     assert layer(project, "DH assay").featureCount() == 3
+
+
+def test_polygon_surfaces_are_restored_as_polygons(
+    geoh5_copy, project, tmp_path
+) -> None:
+    project.addMapLayers(
+        load_object_layers(geoh5_copy, uids(geoh5_copy)["zoned"], as_polygons=True)
+    )
+    qgz = str(tmp_path / "polygons.qgz")
+    project.write(qgz)
+    project.clear()
+    project.read(qgz)
+    assert restore_project(project) == []
+    zoned = layer(project, "zoned")
+    assert zoned.featureCount() == 2
+    assert "z_mean" in zoned.fields().names()

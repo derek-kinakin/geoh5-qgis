@@ -64,6 +64,7 @@ ROLE_PROPERTY = "geoh5/role"
 # intervals/<table>), so a saved project can be matched to rebuilt layers.
 PART_PROPERTY = "geoh5/part"
 MAIN_PART = "main"
+POLYGONS_PART = "polygons"  # a surface loaded as triangle polygons
 VERTEX_ROLE = "vertices"
 VERTEX_LAYER_SUFFIX = " vertices"
 MESH_PROVIDER = "mdal"
@@ -73,26 +74,33 @@ NBSP = " "
 WKB_POINT_Z = 1001
 WKB_LINESTRING_Z = 1002
 WKB_POLYGON_Z = 1003
-WKB_MULTIPOLYGON_Z = 1006
 
 
 def load_object_layers(
-    path: str | Path, object_uid: str, crs: str | None = None
+    path: str | Path,
+    object_uid: str,
+    crs: str | None = None,
+    as_polygons: bool = False,
 ) -> list[QgsMapLayer]:
     """Build the QGIS layers for one geoh5 object.
 
     Most objects give one layer. A curve with vertex data also gives a PointZ
     "<name> vertices" layer (custom property ``geoh5/role`` = ``"vertices"``).
+    Surfaces load as meshes, or with ``as_polygons`` as one PolygonZ per
+    triangle (part ``"polygons"``).
 
     Args:
         path: Path to the .geoh5 file.
         object_uid: Object group name, as reported by reader.list_objects().
         crs: CRS to assign (e.g. ``"EPSG:26914"``). Defaults to the CRS stored in
             the object's metadata, if any.
+        as_polygons: Load a surface as triangle polygons instead of a mesh.
+            Ignored for other object kinds.
 
     Returns:
-        The main layer first: a QgsVectorLayer (Points, Curve, Surface), a
-        QgsMeshLayer (Surface with vertex data) or a QgsRasterLayer (Grid2D).
+        The main layer first: a QgsVectorLayer (Points, Curve, drillholes,
+        surface polygons), a QgsMeshLayer (Surface) or a QgsRasterLayer
+        (Grid2D, GeoImage).
 
     Raises:
         KeyError: If the object does not exist.
@@ -103,7 +111,9 @@ def load_object_layers(
         if info is None:
             raise KeyError(f"No object {object_uid!r} in {path}")
         crs = crs or read_crs(workspace, object_uid)
-        layers = _build_layers(workspace, path, info.kind, info.name, object_uid, crs)
+        layers = _build_layers(
+            workspace, path, info.kind, info.name, object_uid, crs, as_polygons
+        )
     for layer in layers:
         layer.setCustomProperty(PATH_PROPERTY, str(path))
         layer.setCustomProperty(UID_PROPERTY, object_uid)
@@ -143,6 +153,7 @@ def _build_layers(
     name: str,
     uid: str,
     crs: str | None,
+    as_polygons: bool = False,
 ) -> list[QgsMapLayer]:
     if kind == POINTS:
         vertices = read_vertices(workspace, uid)
@@ -161,13 +172,13 @@ def _build_layers(
         vertices = read_vertices(workspace, uid)
         cells = read_cells(workspace, uid)
         cell_data = read_attributes(workspace, uid, "Cell", len(cells))
+        if as_polygons:
+            return [surface_polygons_layer(name, vertices, cells, cell_data, crs)]
         vertex_data = _numeric(read_attributes(workspace, uid, "Vertex", len(vertices)))
-        if vertex_data:
-            mesh = surface_mesh_layer(
-                name, vertices, cells, vertex_data, _numeric(cell_data), crs
-            )
-            return [mesh]
-        return [surface_layer(name, vertices, cells, cell_data, crs)]
+        mesh = surface_mesh_layer(
+            name, vertices, cells, vertex_data, _numeric(cell_data), crs
+        )
+        return [mesh]
     if kind == GRID2D:
         frame = read_grid2d_frame(workspace, uid)
         n_cells = frame.u_count * frame.v_count
@@ -270,17 +281,18 @@ def curve_vertex_layer(
     return layer
 
 
-def surface_layer(
+def surface_polygons_layer(
     name: str,
     vertices: np.ndarray,
     cells: np.ndarray,
     attributes: dict[str, np.ndarray],
     crs: str | None,
 ) -> QgsVectorLayer:
-    """Build a memory layer of a triangulated surface.
+    """Build a memory layer with one PolygonZ feature per surface triangle.
 
-    With per-triangle attributes, each triangle is a PolygonZ feature. Without
-    them, the whole surface is a single MultiPolygonZ feature.
+    Each triangle gets ``z_min``, ``z_max`` and ``z_mean`` of its corners (for
+    graduated styling by elevation) followed by its triangle data. The layer's
+    part is ``"polygons"``, so a reopened project rebuilds it as polygons.
 
     Args:
         name: Layer name.
@@ -293,13 +305,18 @@ def surface_layer(
         The memory layer.
     """
     rings = vertices[np.column_stack([cells, cells[:, 0]])]  # closed: (m, 4, 3)
-    if not attributes:
-        # One feature for the whole surface: far faster and lighter than one
-        # feature per triangle, and nothing per-triangle to show anyway.
-        multi = _from_wkb(_wkb_multi(WKB_MULTIPOLYGON_Z, WKB_POLYGON_Z, (1, 4), rings))
-        return _vector_layer("MultiPolygonZ", name, crs, [multi], {})
+    corner_z = vertices[cells][:, :, 2]
+    elevation = {
+        "z_min": corner_z.min(axis=1),
+        "z_max": corner_z.max(axis=1),
+        "z_mean": corner_z.mean(axis=1),
+    }
     geometries = _wkb_geometries(WKB_POLYGON_Z, (1, 4), rings)
-    return _vector_layer("PolygonZ", name, crs, geometries, attributes)
+    layer = _vector_layer(
+        "PolygonZ", name, crs, geometries, _prepend(elevation, attributes)
+    )
+    layer.setCustomProperty(PART_PROPERTY, POLYGONS_PART)
+    return layer
 
 
 def surface_mesh_layer(
@@ -735,17 +752,6 @@ def _wkb_geometries(
     raw = _wkb_records(type_code, counts, coords)
     size = len(raw) // len(coords) if len(coords) else 0
     return [_from_wkb(raw[i * size : (i + 1) * size]) for i in range(len(coords))]
-
-
-def _wkb_multi(
-    multi_code: int, type_code: int, counts: tuple[int, ...], coords: np.ndarray
-) -> bytes:
-    """ISO WKB of a multi-geometry whose parts are the rows of ``coords``."""
-    header = (
-        np.array([1], "u1").tobytes()
-        + np.array([multi_code, len(coords)], "<u4").tobytes()
-    )
-    return header + _wkb_records(type_code, counts, coords)
 
 
 def _wkb_records(type_code: int, counts: tuple[int, ...], coords: np.ndarray) -> bytes:

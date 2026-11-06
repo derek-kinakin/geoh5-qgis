@@ -23,6 +23,7 @@ from geoh5_qgis.layers import (
     MAIN_PART,
     PART_PROPERTY,
     PATH_PROPERTY,
+    POLYGONS_PART,
     ROLE_PROPERTY,
     UID_PROPERTY,
 )
@@ -35,8 +36,8 @@ MESSAGE_TITLE = "geoh5"
 # Sources rebuilt by preprocess_source while the current project was read.
 _FRESH_SOURCES: set[str] = set()
 
-# (geoh5 path, object UID) -> the project's layers built from that object.
-Targets = dict[tuple[str, str], list[QgsMapLayer]]
+# (geoh5 path, object UID, as_polygons) -> the project's layers built from it.
+Targets = dict[tuple[str, str, bool], list[QgsMapLayer]]
 
 
 def restore_project(project: QgsProject) -> list[str]:
@@ -49,7 +50,7 @@ def restore_project(project: QgsProject) -> list[str]:
         One message per object or layer that could not be rebuilt.
     """
     targets = geoh5_layers(project)
-    results = [(path, uid, try_load(path, uid)) for path, uid in targets]
+    results = [(*key, try_load(*key)) for key in targets]
     return _apply(targets, results)
 
 
@@ -132,14 +133,16 @@ def geoh5_layers(project: QgsProject) -> Targets:
         project: A QGIS project.
 
     Returns:
-        (geoh5 path, object UID) to the layers built from that object.
+        (geoh5 path, object UID, as_polygons) to the layers built from it.
     """
     targets: Targets = {}
     for layer in project.mapLayers().values():
         path = layer.customProperty(PATH_PROPERTY)
         uid = layer.customProperty(UID_PROPERTY)
         if path and uid:
-            targets.setdefault((str(path), str(uid)), []).append(layer)
+            as_polygons = _part(layer) == POLYGONS_PART
+            key = (str(path), str(uid), as_polygons)
+            targets.setdefault(key, []).append(layer)
     # Objects whose layers were all just rebuilt by preprocess_source are current.
     fresh = {
         key
@@ -180,13 +183,13 @@ def transplant(target: QgsMapLayer, source: QgsMapLayer) -> str | None:
 
 def _apply(targets: Targets, results: list[LoadResult]) -> list[str]:
     errors: list[str] = []
-    for path, uid, rebuilt in results:
+    for path, uid, as_polygons, rebuilt in results:
         if isinstance(rebuilt, str):
             errors.append(rebuilt)
             continue
         by_part = {_part(layer): layer for layer in rebuilt}
         by_name = {layer.name(): layer for layer in rebuilt}
-        for target in targets.get((path, uid), []):
+        for target in targets.get((path, uid, as_polygons), []):
             # Projects saved before parts existed: fall back to the layer name.
             source = by_part.get(_part(target)) or by_name.get(target.name())
             error = (
