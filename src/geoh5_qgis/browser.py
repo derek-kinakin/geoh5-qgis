@@ -33,6 +33,7 @@ from qgis.PyQt.QtGui import QAction
 from geoh5_qgis.layers import load_object_layers
 from geoh5_qgis.reader import (
     CURVE,
+    DRILLHOLES,
     GEOIMAGE,
     GRID2D,
     GROUP,
@@ -59,6 +60,7 @@ _KIND_ICONS = {
     SURFACE: QgsLayerItem.iconPolygon,
     GRID2D: QgsLayerItem.iconRaster,
     GEOIMAGE: QgsLayerItem.iconRaster,
+    DRILLHOLES: QgsLayerItem.iconLine,
 }
 
 

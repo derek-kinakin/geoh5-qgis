@@ -24,7 +24,10 @@ CURVE = "Curve"
 SURFACE = "Surface"
 GRID2D = "Grid2D"
 GEOIMAGE = "GeoImage"
+DRILLHOLES = "Drillholes"
 UNSUPPORTED = "Unsupported"
+# Array marking a drillhole group whose holes are in concatenated storage.
+CONCATENATED_IDS = "Concatenated object IDs"
 GROUP = "Group"
 # RootGroup shares the NoType group type UID (geoh5py groups/notype.py).
 NO_TYPE_GROUP_UID = "{dd99b610-be92-48c0-873c-5b5946ea2840}"
@@ -455,6 +458,10 @@ def load_issue(workspace: Workspace, info: ObjectInfo) -> str | None:
         return "object type not supported yet"
     if info.kind == GEOIMAGE:
         return _geoimage_issue(read_geoimage(workspace, info.uid))
+    if info.kind == DRILLHOLES:
+        group = _child_group(_child_group(workspace, "Groups"), info.uid)
+        ids = _array(group, CONCATENATED_IDS).Read()
+        return None if ids else "drillhole group has no holes"
     if info.kind != GRID2D:
         return None
     frame = read_grid2d_frame(workspace, info.uid)
@@ -469,6 +476,27 @@ def load_issue(workspace: Workspace, info: ObjectInfo) -> str | None:
     return None
 
 
+def find_object(workspace: Workspace, uid: str) -> ObjectInfo | None:
+    """Find a loadable entity by UID: an object, or a drillhole group.
+
+    Args:
+        workspace: Project group from open_workspace().
+        uid: Object or group name.
+
+    Returns:
+        Its ObjectInfo (kind DRILLHOLES for a drillhole group), or None.
+    """
+    found = next((o for o in list_objects(workspace) if o.uid == uid), None)
+    if found is not None:
+        return found
+    group = _indexed(workspace, "Groups", uid)
+    if group is None or not _is_drillhole_group(group):
+        return None
+    return ObjectInfo(
+        uid, str(_attrs(group).get("Name", "")), DRILLHOLES, _type_uid(group)
+    )
+
+
 def read_crs(workspace: Workspace, object_uid: str) -> str | None:
     """Read an object's coordinate reference system code from its metadata.
 
@@ -480,9 +508,9 @@ def read_crs(workspace: Workspace, object_uid: str) -> str | None:
         A code such as ``"EPSG:26914"``, or None if absent or "Unknown".
 
     Raises:
-        KeyError: If the object does not exist.
+        KeyError: If the object (or group) does not exist.
     """
-    obj = _object(workspace, object_uid)
+    obj = _entity(workspace, object_uid)
     if "Metadata" not in (obj.GetMDArrayNames() or []):
         return None
     raw = obj.OpenMDArray("Metadata").Read()
@@ -540,6 +568,9 @@ def _node(
     seen.add(uid)
     if family == "Groups":
         name = str(_attrs(entity).get("Name", ""))
+        if _is_drillhole_group(entity):
+            # Holes live in concatenated storage: the group loads as one item.
+            return TreeNode(key, name, DRILLHOLES)
         return TreeNode(key, name, GROUP, _child_nodes(workspace, entity, seen))
     info = _object_info(key, entity)
     return TreeNode(key, info.name, info.kind)
@@ -630,6 +661,18 @@ def _data_info(uid: str, data: gdal.Group) -> DataInfo | None:
 
 def _object(workspace: Workspace, uid: str) -> gdal.Group:
     return _child_group(_child_group(workspace, "Objects"), uid)
+
+
+def _entity(workspace: Workspace, uid: str) -> gdal.Group:
+    """An object, or failing that a group, by UID."""
+    group = _indexed(workspace, "Objects", uid) or _indexed(workspace, "Groups", uid)
+    if group is None:
+        raise KeyError(f"No object or group {uid!r}")
+    return group
+
+
+def _is_drillhole_group(group: gdal.Group) -> bool:
+    return CONCATENATED_IDS in (group.GetMDArrayNames() or [])
 
 
 def _data(workspace: Workspace, uid: str) -> gdal.Group:

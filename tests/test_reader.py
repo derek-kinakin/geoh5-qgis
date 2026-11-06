@@ -300,14 +300,20 @@ def test_real_ga_tree() -> None:
     assert [(n.name, n.kind) for n in geophysics.children] == [
         ("airborne data", "Grid2D")
     ]
-    # Every indexed object is reachable from the root in this GA file.
-    assert {n.uid.lower() for n in tree_objects(tree)} == flat
+    # Every indexed object is reachable from the root in this GA file; the tree
+    # also lists its two drillhole groups as loadable items.
+    loadable = tree_objects(tree)
+    assert {n.uid.lower() for n in loadable if n.kind != "Drillholes"} == flat
+    assert sorted(n.name for n in loadable if n.kind == "Drillholes") == [
+        "Drillholes",
+        "Drillholes_descriptions",
+    ]
 
 
 @pytest.mark.skipif(not ASSETS.exists(), reason="geoh5vista assets not available")
-def test_real_drillhole_group_shows_as_empty_group() -> None:
-    # Holes live in concatenated storage, which is not read yet.
+def test_real_drillhole_group_is_one_loadable_item() -> None:
+    # Holes live in concatenated storage; the group loads as a whole.
     with open_workspace(ASSETS / "drillholes" / "dh_test_a.geoh5") as ws:
         assert [(n.name, n.kind, n.children) for n in read_tree(ws)] == [
-            ("Drillholes", "Group", ())
+            ("Drillholes", "Drillholes", ())
         ]

@@ -5,8 +5,8 @@ from pathlib import Path
 import h5py
 import numpy as np
 import pytest
-from geoh5py.groups import ContainerGroup
-from geoh5py.objects import Curve, GeoImage, Grid2D, Points, Surface
+from geoh5py.groups import ContainerGroup, DrillholeGroup
+from geoh5py.objects import Curve, Drillhole, GeoImage, Grid2D, Points, Surface
 from geoh5py.workspace import Workspace
 
 CRS_METADATA = {
@@ -39,6 +39,12 @@ SURFACE_VERTICES = np.array(
 )
 SURFACE_CELLS = np.array([[0, 1, 2], [1, 3, 2]], dtype=np.uint32)
 SHADED_VERTEX_VALUES = np.array([1.0, np.nan, 3.0, 4.0])
+H1_COLLAR = np.r_[1000.0, 2000.0, 300.0]
+H1_SURVEYS = np.c_[[0.0, 100.0, 200.0], [90.0, 100.0, 120.0], [-60.0, -55.0, -50.0]]
+H1_FROM_TO = np.c_[[0.0, 50.0, 120.0], [50.0, 120.0, 250.0]]
+H1_LITH_KEYS = np.array([1, 2, 1], dtype=np.int32)
+H1_LITH_MAP = {1: "granite", 2: "basalt"}
+H1_AU = np.array([0.5, 1.5, np.nan])
 # 3 rows x 4 columns RGB; pixel (row, col) = (10*row, 10*col, 200).
 IMAGE_PIXELS = np.array(
     [[[10 * r, 10 * c, 200] for c in range(4)] for r in range(3)], dtype=np.uint8
@@ -159,6 +165,38 @@ def rootless_tree_file(tmp_path: Path) -> Path:
         root_id = root_id.decode() if isinstance(root_id, bytes) else root_id
         del project["Root"]
         del project["Groups"][root_id]
+    return path
+
+
+@pytest.fixture(scope="session")
+def drillhole_file(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """geoh5py drillhole group 'DH': curved H1 with an 'assay' interval table and
+    a straight vertical V2. geoh5py writes no GA 'Trace', so paths are desurveyed."""
+    path = tmp_path_factory.mktemp("geoh5") / "drillholes.geoh5"
+    with Workspace.create(path) as ws:
+        group = DrillholeGroup.create(ws, name="DH")
+        curved = Drillhole.create(
+            ws, name="H1", parent=group, collar=H1_COLLAR, surveys=H1_SURVEYS
+        )
+        curved.add_data(
+            {
+                "LITH": {
+                    "values": H1_LITH_KEYS,
+                    "from-to": H1_FROM_TO,
+                    "type": "referenced",
+                    "value_map": H1_LITH_MAP,
+                },
+                "AU": {"values": H1_AU, "from-to": H1_FROM_TO},
+            },
+            property_group="assay",
+        )
+        Drillhole.create(
+            ws,
+            name="V2",
+            parent=group,
+            collar=np.r_[500.0, 500.0, 100.0],
+            surveys=np.c_[[0.0, 80.0], [0.0, 0.0], [-90.0, -90.0]],
+        )
     return path
 
 

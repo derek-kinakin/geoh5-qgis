@@ -27,9 +27,16 @@ from qgis.core import (
 from qgis.PyQt.QtCore import QMetaType
 from qgis.PyQt.QtXml import QDomDocument
 
+from geoh5_qgis.drillholes import (
+    DrillholeGroupData,
+    IntervalTable,
+    interval_path,
+    read_drillholes,
+)
 from geoh5_qgis.hdf5_blob import read_blob
 from geoh5_qgis.reader import (
     CURVE,
+    DRILLHOLES,
     GEOIMAGE,
     GRID2D,
     INTEGER_NDV,
@@ -37,8 +44,8 @@ from geoh5_qgis.reader import (
     SURFACE,
     Grid2DFrame,
     Workspace,
+    find_object,
     is_horizontal,
-    list_objects,
     open_workspace,
     read_attributes,
     read_cells,
@@ -90,7 +97,7 @@ def load_object_layers(
         ValueError: If the object kind is unsupported or cannot be mapped.
     """
     with open_workspace(path) as workspace:
-        info = next((o for o in list_objects(workspace) if o.uid == object_uid), None)
+        info = find_object(workspace, object_uid)
         if info is None:
             raise KeyError(f"No object {object_uid!r} in {path}")
         crs = crs or read_crs(workspace, object_uid)
@@ -158,6 +165,8 @@ def _build_layers(
         n_cells = frame.u_count * frame.v_count
         bands = _numeric(read_attributes(workspace, uid, "Cell", n_cells))
         return [grid2d_layer(name, uid, frame, bands, crs)]
+    if kind == DRILLHOLES:
+        return drillhole_layers(name, read_drillholes(workspace, uid), crs)
     if kind == GEOIMAGE:
         image = read_geoimage(workspace, uid)
         if image.blob_path is None:
@@ -437,6 +446,82 @@ def grid2d_layer(
     if crs:
         layer.setCrs(QgsCoordinateReferenceSystem(crs))
     return layer
+
+
+def drillhole_layers(
+    name: str, group: DrillholeGroupData, crs: str | None
+) -> list[QgsVectorLayer]:
+    """Build collar, trace and interval layers for a drillhole group.
+
+    - "<name> collars": PointZ per hole (hole, end_of_hole, planning).
+    - "<name> traces": LineStringZ per hole along its path.
+    - "<name> <table>": LineStringZ per interval of each interval table, following
+      the hole between its from and to depths, with the table's channels.
+
+    Args:
+        name: Drillhole group name.
+        group: Holes and interval tables from drillholes.read_drillholes().
+        crs: CRS string, or None to leave it unset.
+
+    Returns:
+        The layers, collars first.
+    """
+    holes = group.holes
+    hole_names = np.array([h.name for h in holes], dtype=object)
+    collars = points_layer(
+        f"{name} collars",
+        np.array([h.collar for h in holes]).reshape(-1, 3),
+        {
+            "hole": hole_names,
+            "end_of_hole": np.array(
+                [np.nan if h.end_of_hole is None else h.end_of_hole for h in holes]
+            ),
+            "planning": np.array([h.planning for h in holes], dtype=object),
+        },
+        crs,
+    )
+    traces = _vector_layer(
+        "LineStringZ",
+        f"{name} traces",
+        crs,
+        [_line_geometry(h.trace) for h in holes],
+        {"hole": hole_names},
+    )
+    layers = [collars, traces] + [
+        _interval_layer(f"{name} {table.name}", holes, table, crs)
+        for table in group.intervals
+    ]
+    for layer, role in zip(layers, ["collars", "traces"], strict=False):
+        layer.setCustomProperty(ROLE_PROPERTY, role)
+    return layers
+
+
+def _interval_layer(
+    name: str, holes: tuple, table: IntervalTable, crs: str | None
+) -> QgsVectorLayer:
+    geometries = [
+        _line_geometry(interval_path(holes[i].trace, holes[i].trace_depth, s, e))
+        for i, s, e in zip(table.hole_index, table.start, table.end, strict=True)
+    ]
+    fixed = {
+        "hole": np.array([holes[i].name for i in table.hole_index], dtype=object),
+        "from": table.start,
+        "to": table.end,
+    }
+    layer = _vector_layer(
+        "LineStringZ", name, crs, geometries, _prepend(fixed, table.columns)
+    )
+    layer.setCustomProperty(ROLE_PROPERTY, "intervals")
+    return layer
+
+
+def _line_geometry(points: np.ndarray) -> QgsGeometry:
+    """LineStringZ from an (n, 3) array, via ISO WKB."""
+    header = (
+        np.array([1], "u1").tobytes()
+        + np.array([WKB_LINESTRING_Z, len(points)], "<u4").tobytes()
+    )
+    return _from_wkb(header + np.ascontiguousarray(points, dtype="<f8").tobytes())
 
 
 def geoimage_layer(

@@ -11,7 +11,8 @@ objects to a QGIS project as in-memory layers.
   it and choose **Add Object to Project**.
 - Right-clicking a file or group gives **Add All Supported Objects to Project** or
   **Add All Objects in Group to Project**.
-- Supported objects: Points, Curve, Surface and horizontal Grid2D. Surfaces with vertex
+- Supported objects: Points, Curve, Surface, horizontal Grid2D, GeoImage and drillhole
+  groups (collars, traces and interval tables). Surfaces with vertex
   data load as mesh layers coloured by elevation; the other surfaces load as vector
   layers.
 

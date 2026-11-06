@@ -60,3 +60,8 @@ Background research and decisions: `docs/research/geoh5-qgis-plugin-research.md`
 - `QgsMeshLayer3DRenderer` is not exposed to Python in 4.2: the mesh 3D renderer is
   built from XML via `QgsApplication.renderer3DRegistry()` (call `Qgs3D.initialize()`
   outside the desktop app). There is no Python offscreen 3D engine for testing.
+- Drillhole groups use concatenated storage (see `drillholes.py` docstring). GA files
+  store each hole's desurveyed `Trace`; geoh5py-written files do not, so the plugin
+  desurveys those with minimum curvature (stations densified every 50 m, as GA/geoh5py
+  do). Interval tables are property groups of type "Interval table"; their first two
+  properties are FROM and TO.
