@@ -13,6 +13,7 @@ from geoh5_qgis.browser import (
     Geoh5DataItemProvider,
     Geoh5DropHandler,
     Geoh5FileItem,
+    Geoh5GroupItem,
     Geoh5ObjectItem,
     add_objects,
     loadable_object_uids,
@@ -151,3 +152,49 @@ def test_loadable_object_uids_skips_blocked_objects(grid_issues_file: Path) -> N
     assert loadable_object_uids(grid_issues_file) == [
         uid_of(grid_issues_file, "nearly_flat")
     ]
+
+
+def children_outline(item) -> list:
+    return [
+        (c.name(), "Group", children_outline(c))
+        if isinstance(c, Geoh5GroupItem)
+        else (c.name(), c.kind)
+        for c in item.createChildren()
+    ]
+
+
+def test_file_item_shows_ga_group_folders(tree_file: Path) -> None:
+    assert children_outline(file_item(tree_file)) == [
+        ("Empty", "Group", []),
+        (
+            "Folder A",
+            "Group",
+            [("Sub", "Group", [("line_b", "Curve")]), ("pts_a", "Points")],
+        ),
+        ("top_pts", "Points"),
+    ]
+
+
+def test_group_item_paths_are_unique(tree_file: Path) -> None:
+    folder = next(
+        c for c in file_item(tree_file).createChildren() if c.name() == "Folder A"
+    )
+    paths = [c.path() for c in folder.createChildren()]
+    assert len(set(paths)) == len(paths)
+    assert all(p.startswith(folder.path() + "/") for p in paths)
+
+
+def test_group_item_lists_its_loadable_objects(tree_file: Path) -> None:
+    folder = next(
+        c for c in file_item(tree_file).createChildren() if c.name() == "Folder A"
+    )
+    assert folder.loadable_uids() == [
+        uid_of(tree_file, "line_b"),
+        uid_of(tree_file, "pts_a"),
+    ]
+
+
+def test_add_all_uses_the_tree_not_the_flat_index(orphan_tree_file: Path) -> None:
+    uids = loadable_object_uids(orphan_tree_file)
+    assert uid_of(orphan_tree_file, "top_pts") not in uids
+    assert len(uids) == 2

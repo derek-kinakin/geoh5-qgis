@@ -5,9 +5,10 @@ thin classes. The work they trigger is done by plain functions
 (``add_objects``, ``object_uri``, ``parse_object_uri``).
 
 Interaction:
-- A .geoh5 file expands to one item per object.
+- A .geoh5 file expands to its GEOSCIENCE ANALYST group folders and objects.
 - Double-click an object, drag it onto the map, or use the context menu to add
-  it to the project. The file's context menu can add all supported objects.
+  it to the project. Group and file context menus add every loadable object
+  below them.
 """
 
 from pathlib import Path
@@ -30,12 +31,16 @@ from geoh5_qgis.layers import load_object_layers
 from geoh5_qgis.reader import (
     CURVE,
     GRID2D,
+    GROUP,
     POINTS,
     SURFACE,
     ObjectInfo,
+    TreeNode,
     list_objects,
     load_issue,
     open_workspace,
+    read_tree,
+    tree_objects,
 )
 
 PROVIDER_KEY = "geoh5"
@@ -141,16 +146,44 @@ class Geoh5FileItem(QgsDataCollectionItem):
 
     def createChildren(self) -> list[QgsDataItem]:
         try:
-            with open_workspace(self.file_path) as workspace:
-                objects = [
-                    (o, _safe_issue(workspace, o)) for o in list_objects(workspace)
-                ]
+            nodes, issues = read_file_contents(self.file_path)
         except (RuntimeError, ValueError, FileNotFoundError) as exc:
             return [QgsErrorItem(self, f"Cannot read file: {exc}", f"{self.path()}/!")]
-        ordered = sorted(objects, key=lambda pair: (pair[0].name.lower(), pair[0].uid))
+        return _child_items(self, nodes, issues, self.file_path)
+
+
+class Geoh5GroupItem(QgsDataCollectionItem):
+    """A GEOSCIENCE ANALYST group (folder); children come from the file's tree."""
+
+    def __init__(
+        self,
+        parent: QgsDataItem,
+        node: TreeNode,
+        file_path: str,
+        issues: dict[str, str | None],
+    ) -> None:
+        super().__init__(parent, node.name, f"{parent.path()}/{node.uid}", PROVIDER_KEY)
+        self.file_path = file_path
+        self.node = node
+        self.issues = issues
+        # Children are already in memory, so expanding is cheap.
+        self.setCapabilitiesV2(
+            Qgis.BrowserItemCapability.Fertile | Qgis.BrowserItemCapability.Fast
+        )
+        if not node.children:
+            self.setState(Qgis.BrowserItemState.Populated)
+        count = len(tree_objects(node.children))
+        self.setToolTip(f"Group ({count} objects)\n{node.uid}")
+
+    def createChildren(self) -> list[QgsDataItem]:
+        return _child_items(self, self.node.children, self.issues, self.file_path)
+
+    def loadable_uids(self) -> list[str]:
+        """UIDs of the loadable objects anywhere below this group."""
         return [
-            Geoh5ObjectItem(self, info, self.file_path, issue)
-            for info, issue in ordered
+            n.uid
+            for n in tree_objects(self.node.children)
+            if not self.issues.get(n.uid)
         ]
 
 
@@ -164,7 +197,7 @@ class Geoh5ObjectItem(QgsDataItem):
     def __init__(
         self,
         parent: QgsDataItem,
-        info: ObjectInfo,
+        info: TreeNode,
         file_path: str,
         issue: str | None = None,
     ) -> None:
@@ -228,6 +261,10 @@ class Geoh5DataItemGuiProvider(QgsDataItemGuiProvider):
             action = QAction(label, menu)
             action.triggered.connect(lambda: _add_items(objects, context))
             menu.addAction(action)
+        elif isinstance(item, Geoh5GroupItem) and item.loadable_uids():
+            action = QAction("Add All Objects in Group to Project", menu)
+            action.triggered.connect(lambda: _add_group(item, context))
+            menu.addAction(action)
         elif isinstance(item, Geoh5FileItem):
             action = QAction("Add All Supported Objects to Project", menu)
             action.triggered.connect(lambda: _add_file(item.file_path, context))
@@ -257,27 +294,74 @@ def _add_items(items: list[Geoh5ObjectItem], context) -> None:
     _report(errors, context.messageBar())
 
 
-def loadable_object_uids(path: str | Path) -> list[str]:
-    """UIDs of the objects in a file that can be loaded as layers.
+def read_file_contents(
+    path: str | Path,
+) -> tuple[tuple[TreeNode, ...], dict[str, str | None]]:
+    """Read a file's tree and why each object can or cannot be loaded.
+
+    Falls back to a flat object list if the group tree cannot be read.
 
     Args:
         path: Path to the .geoh5 file.
 
     Returns:
-        UIDs of objects with no load issue, in file order.
+        The top-level tree nodes, and object UID to load issue (None if the
+        object can be loaded).
+
+    Raises:
+        RuntimeError: If GDAL cannot open the file.
+        ValueError: If the file is not a geoh5 project.
+        FileNotFoundError: If the file does not exist.
     """
     with open_workspace(path) as workspace:
-        return [
-            o.uid for o in list_objects(workspace) if _safe_issue(workspace, o) is None
-        ]
+        try:
+            nodes = tuple(read_tree(workspace))
+        except (KeyError, RuntimeError, ValueError):
+            objects = sorted(list_objects(workspace), key=lambda o: o.name.lower())
+            nodes = tuple(TreeNode(o.uid, o.name, o.kind) for o in objects)
+        issues = {n.uid: _safe_issue(workspace, n) for n in tree_objects(nodes)}
+    return nodes, issues
 
 
-def _safe_issue(workspace, info: ObjectInfo) -> str | None:
+def loadable_object_uids(path: str | Path) -> list[str]:
+    """UIDs of the objects shown in a file's tree that can be loaded as layers.
+
+    Args:
+        path: Path to the .geoh5 file.
+
+    Returns:
+        UIDs of objects with no load issue, in tree order.
+    """
+    nodes, issues = read_file_contents(path)
+    return [n.uid for n in tree_objects(nodes) if issues[n.uid] is None]
+
+
+def _child_items(
+    parent: QgsDataItem,
+    nodes: tuple[TreeNode, ...],
+    issues: dict[str, str | None],
+    file_path: str,
+) -> list[QgsDataItem]:
+    return [
+        Geoh5GroupItem(parent, node, file_path, issues)
+        if node.kind == GROUP
+        else Geoh5ObjectItem(parent, node, file_path, issues.get(node.uid))
+        for node in nodes
+    ]
+
+
+def _safe_issue(workspace, node: TreeNode) -> str | None:
     """load_issue(), turning a malformed object into an issue instead of failing."""
+    info = ObjectInfo(node.uid, node.name, node.kind, type_uid="")
     try:
         return load_issue(workspace, info)
     except (KeyError, RuntimeError, ValueError) as exc:
         return f"cannot read object: {exc}"
+
+
+def _add_group(item: "Geoh5GroupItem", context) -> None:
+    _, errors = add_objects(item.file_path, item.loadable_uids(), QgsProject.instance())
+    _report(errors, context.messageBar())
 
 
 def _add_file(path: str, context) -> None:

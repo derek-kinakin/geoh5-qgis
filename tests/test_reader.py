@@ -29,8 +29,10 @@ from geoh5_qgis.reader import (
     read_crs,
     read_data_values,
     read_grid2d_frame,
+    read_tree,
     read_value_map,
     read_vertices,
+    tree_objects,
 )
 
 ASSETS = Path(r"C:\Users\dkinakin\Dev\geoh5vista\assets")
@@ -225,3 +227,87 @@ def test_real_grid_issues() -> None:
     assert real["airborne data"] is None  # dip stored as -0.0
     blocks = issues_by_name(ASSETS / "block_model" / "test_bm.geoh5")
     assert all("not supported" in issue for issue in blocks.values())
+
+
+def outline(nodes) -> list:
+    """Nested (name, kind[, children]) tuples for easy comparison."""
+    return [
+        (n.name, n.kind, outline(n.children)) if n.kind == "Group" else (n.name, n.kind)
+        for n in nodes
+    ]
+
+
+TREE_OUTLINE = [
+    ("Empty", "Group", []),
+    (
+        "Folder A",
+        "Group",
+        [("Sub", "Group", [("line_b", "Curve")]), ("pts_a", "Points")],
+    ),
+    ("top_pts", "Points"),
+]
+
+
+def test_read_tree_mirrors_groups(tree_file: Path) -> None:
+    with open_workspace(tree_file) as ws:
+        tree = read_tree(ws)
+        flat = {o.uid: o for o in list_objects(ws)}
+    assert outline(tree) == TREE_OUTLINE
+    pts_a = tree[1].children[1]
+    assert flat[pts_a.uid].name == "pts_a"
+
+
+def test_tree_objects_flattens_in_tree_order(tree_file: Path) -> None:
+    with open_workspace(tree_file) as ws:
+        assert [n.name for n in tree_objects(read_tree(ws))] == [
+            "line_b",
+            "pts_a",
+            "top_pts",
+        ]
+
+
+def test_tree_hides_objects_unlinked_from_root(orphan_tree_file: Path) -> None:
+    with open_workspace(orphan_tree_file) as ws:
+        assert outline(read_tree(ws)) == TREE_OUTLINE[:2]
+        # The flat index still has it; the tree is what GA shows.
+        assert "top_pts" in {o.name for o in list_objects(ws)}
+
+
+def test_rootless_file_is_read_as_a_forest(rootless_tree_file: Path) -> None:
+    with open_workspace(rootless_tree_file) as ws:
+        assert outline(read_tree(ws)) == TREE_OUTLINE
+
+
+def test_flat_file_tree_lists_objects(geoh5_file: Path) -> None:
+    with open_workspace(geoh5_file) as ws:
+        names = [n.name for n in read_tree(ws)]
+    assert names == sorted(names, key=str.lower)
+    assert "pts" in names
+
+
+@pytest.mark.skipif(not ASSETS.exists(), reason="geoh5vista assets not available")
+def test_real_ga_tree() -> None:
+    with open_workspace(ASSETS / "workspace" / "workspace_complex.geoh5") as ws:
+        tree = read_tree(ws)
+        flat = {o.uid.lower() for o in list_objects(ws)}
+    assert [n.name for n in tree] == [
+        "FlinFlon Canada",
+        "GemPy Implicit Modelling",
+        "Tools",
+    ]
+    flinflon = tree[0]
+    geophysics = next(n for n in flinflon.children if n.name == "Geophysics data")
+    assert [(n.name, n.kind) for n in geophysics.children] == [
+        ("airborne data", "Grid2D")
+    ]
+    # Every indexed object is reachable from the root in this GA file.
+    assert {n.uid.lower() for n in tree_objects(tree)} == flat
+
+
+@pytest.mark.skipif(not ASSETS.exists(), reason="geoh5vista assets not available")
+def test_real_drillhole_group_shows_as_empty_group() -> None:
+    # Holes live in concatenated storage, which is not read yet.
+    with open_workspace(ASSETS / "drillholes" / "dh_test_a.geoh5") as ws:
+        assert [(n.name, n.kind, n.children) for n in read_tree(ws)] == [
+            ("Drillholes", "Group", ())
+        ]

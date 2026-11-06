@@ -5,10 +5,12 @@ objects to a QGIS project as in-memory layers.
 
 **Status:** early development (experimental).
 
-- `.geoh5` files expand in the Browser panel to show their objects.
+- `.geoh5` files expand in the Browser panel to show their GEOSCIENCE ANALYST group
+  folders and objects.
 - To add an object to the project, double-click it, drag it onto the map, or right-click
   it and choose **Add Object to Project**.
-- Right-clicking a file gives **Add All Supported Objects to Project**.
+- Right-clicking a file or group gives **Add All Supported Objects to Project** or
+  **Add All Objects in Group to Project**.
 - Supported objects: Points, Curve, Surface and horizontal Grid2D. Surfaces with vertex
   data load as mesh layers coloured by elevation; the other surfaces load as vector
   layers.

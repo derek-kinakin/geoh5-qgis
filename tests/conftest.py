@@ -2,8 +2,10 @@
 
 from pathlib import Path
 
+import h5py
 import numpy as np
 import pytest
+from geoh5py.groups import ContainerGroup
 from geoh5py.objects import Curve, Grid2D, Points, Surface
 from geoh5py.workspace import Workspace
 
@@ -102,6 +104,53 @@ def geoh5_file(tmp_path_factory: pytest.TempPathFactory) -> Path:
                 }
             }
         )
+    return path
+
+
+def write_tree_file(path: Path) -> Path:
+    """Root: Empty/, Folder A/{Sub/{line_b}, pts_a}, top_pts."""
+    with Workspace.create(path) as ws:
+        folder = ContainerGroup.create(ws, name="Folder A")
+        sub = ContainerGroup.create(ws, name="Sub", parent=folder)
+        ContainerGroup.create(ws, name="Empty")
+        Points.create(ws, name="pts_a", vertices=POINT_VERTICES, parent=folder)
+        Curve.create(
+            ws, name="line_b", vertices=CURVE_VERTICES, cells=CURVE_CELLS, parent=sub
+        )
+        Points.create(ws, name="top_pts", vertices=POINT_VERTICES)
+    return path
+
+
+@pytest.fixture(scope="session")
+def tree_file(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A geoh5 file with nested container groups."""
+    return write_tree_file(tmp_path_factory.mktemp("geoh5") / "tree.geoh5")
+
+
+@pytest.fixture
+def orphan_tree_file(tmp_path: Path) -> Path:
+    """tree file where top_pts is unlinked from the root (as after a GA delete)."""
+    path = write_tree_file(tmp_path / "orphan.geoh5")
+    with h5py.File(path, "r+") as f:
+        project = f["GEOSCIENCE"]
+        root_objects = project["Root"]["Objects"]
+        top = next(
+            k for k in root_objects if root_objects[k].attrs["Name"] == "top_pts"
+        )
+        del root_objects[top]  # still in the flat /Objects index
+    return path
+
+
+@pytest.fixture
+def rootless_tree_file(tmp_path: Path) -> Path:
+    """tree file with /Root and the indexed root group removed (a forest)."""
+    path = write_tree_file(tmp_path / "rootless.geoh5")
+    with h5py.File(path, "r+") as f:
+        project = f["GEOSCIENCE"]
+        root_id = project["Root"].attrs["ID"]
+        root_id = root_id.decode() if isinstance(root_id, bytes) else root_id
+        del project["Root"]
+        del project["Groups"][root_id]
     return path
 
 

@@ -24,6 +24,9 @@ CURVE = "Curve"
 SURFACE = "Surface"
 GRID2D = "Grid2D"
 UNSUPPORTED = "Unsupported"
+GROUP = "Group"
+# RootGroup shares the NoType group type UID (geoh5py groups/notype.py).
+NO_TYPE_GROUP_UID = "{dd99b610-be92-48c0-873c-5b5946ea2840}"
 
 OBJECT_KINDS = {
     "{202c5db1-a56d-4004-9cad-baafd8899406}": POINTS,
@@ -59,6 +62,16 @@ class ObjectInfo:
     name: str
     kind: str
     type_uid: str
+
+
+@dataclass(frozen=True)
+class TreeNode:
+    """A group or object in the file's tree; ``kind`` is GROUP for groups."""
+
+    uid: str
+    name: str
+    kind: str
+    children: tuple["TreeNode", ...] = ()
 
 
 @dataclass(frozen=True)
@@ -308,6 +321,59 @@ def read_attributes(
     return columns
 
 
+def read_tree(workspace: Workspace) -> list[TreeNode]:
+    """Read the group/object tree as GEOSCIENCE ANALYST shows it.
+
+    The root group's children are returned (the root itself is not). The root
+    is the indexed copy of ``/Root`` when present. Without ``/Root`` the file
+    is read as a forest of the indexed entities no group links to; a single
+    top-level NoType group is then taken to be the root. Entities only in the
+    flat index and not reachable from the root (e.g. deleted in GA) are left
+    out. The walk is lenient: each entity appears once, so repeated links and
+    cycles are skipped. Groups come before objects, each sorted by name.
+
+    Args:
+        workspace: Project group from open_workspace().
+
+    Returns:
+        Top-level tree nodes.
+    """
+    seen: set[str] = set()
+    if "Root" in _groups(workspace):
+        root = workspace.OpenGroup("Root")
+        root_uid = str(_attrs(root).get("ID", "")).lower()
+        indexed = _indexed(workspace, "Groups", root_uid)
+        seen.add(root_uid)
+        return _child_nodes(workspace, indexed or root, seen)
+    tops = _forest_tops(workspace)
+    if len(tops) == 1 and tops[0][0] == "Groups":
+        family, uid = tops[0]
+        group = _indexed(workspace, family, uid)
+        if _type_uid(group) == NO_TYPE_GROUP_UID:
+            seen.add(uid)
+            return _child_nodes(workspace, group, seen)
+    nodes = [
+        _node(workspace, f, uid, _indexed(workspace, f, uid), seen) for f, uid in tops
+    ]
+    return _sorted_nodes([n for n in nodes if n is not None])
+
+
+def tree_objects(nodes: list[TreeNode] | tuple[TreeNode, ...]) -> list[TreeNode]:
+    """All object nodes in a tree, depth first in display order.
+
+    Args:
+        nodes: Nodes from read_tree() (or a group's children).
+
+    Returns:
+        The object (non-group) nodes.
+    """
+    return [
+        found
+        for node in nodes
+        for found in (tree_objects(node.children) if node.kind == GROUP else [node])
+    ]
+
+
 def is_horizontal(frame: Grid2DFrame) -> bool:
     """Whether a Grid2D lies flat, so it can be shown as a map raster.
 
@@ -374,6 +440,89 @@ def read_crs(workspace: Workspace, object_uid: str) -> str | None:
     crs = metadata.get("Coordinate Reference System", {}).get("Current", {})
     code = crs.get("Code") if isinstance(crs, dict) else None
     return code if code and code.lower() != "unknown" else None
+
+
+def _child_nodes(
+    workspace: Workspace, parent: gdal.Group, seen: set[str]
+) -> tuple[TreeNode, ...]:
+    nodes = [
+        _node(
+            workspace, family, key, _link_target(workspace, parent, family, key), seen
+        )
+        for family in ("Groups", "Objects")
+        if family in _groups(parent)
+        for key in _groups(parent.OpenGroup(family))
+    ]
+    return _sorted_nodes([n for n in nodes if n is not None])
+
+
+def _node(
+    workspace: Workspace,
+    family: str,
+    key: str,
+    entity: gdal.Group | None,
+    seen: set[str],
+) -> TreeNode | None:
+    uid = key.lower()
+    if entity is None or uid in seen:
+        return None
+    seen.add(uid)
+    if family == "Groups":
+        name = str(_attrs(entity).get("Name", ""))
+        return TreeNode(key, name, GROUP, _child_nodes(workspace, entity, seen))
+    info = _object_info(key, entity)
+    return TreeNode(key, info.name, info.kind)
+
+
+def _link_target(
+    workspace: Workspace, parent: gdal.Group, family: str, key: str
+) -> gdal.Group | None:
+    """The indexed entity for a child link, else the linked group itself."""
+    indexed = _indexed(workspace, family, key)
+    if indexed is not None:
+        return indexed
+    try:
+        return parent.OpenGroup(family).OpenGroup(key)
+    except RuntimeError:
+        return None
+
+
+def _indexed(workspace: Workspace, family: str, key: str) -> gdal.Group | None:
+    if family not in _groups(workspace):
+        return None
+    index = workspace.OpenGroup(family)
+    match = next((k for k in _groups(index) if k.lower() == key.lower()), None)
+    return index.OpenGroup(match) if match else None
+
+
+def _forest_tops(workspace: Workspace) -> list[tuple[str, str]]:
+    """(family, key) of indexed entities that no indexed group links to."""
+    families = [f for f in ("Groups", "Objects") if f in _groups(workspace)]
+    entities = [(f, k) for f in families for k in _groups(workspace.OpenGroup(f))]
+    linked = {
+        child.lower()
+        for family, key in entities
+        if family == "Groups"
+        for child_family in ("Groups", "Objects")
+        for child in _child_keys(
+            workspace.OpenGroup(family).OpenGroup(key), child_family
+        )
+    }
+    return [(f, k) for f, k in entities if k.lower() not in linked]
+
+
+def _child_keys(group: gdal.Group, family: str) -> list[str]:
+    return _groups(group.OpenGroup(family)) if family in _groups(group) else []
+
+
+def _type_uid(entity: gdal.Group | None) -> str:
+    if entity is None or "Type" not in _groups(entity):
+        return ""
+    return str(_attrs(entity.OpenGroup("Type")).get("ID", "")).lower()
+
+
+def _sorted_nodes(nodes: list[TreeNode]) -> tuple[TreeNode, ...]:
+    return tuple(sorted(nodes, key=lambda n: (n.kind != GROUP, n.name.lower(), n.uid)))
 
 
 def _map_values(keys: np.ndarray, value_map: dict[int, str]) -> np.ndarray:
