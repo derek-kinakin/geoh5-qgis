@@ -33,6 +33,7 @@ from qgis.PyQt.QtGui import QAction
 from geoh5_qgis.layers import load_object_layers
 from geoh5_qgis.reader import (
     CURVE,
+    GEOIMAGE,
     GRID2D,
     GROUP,
     POINTS,
@@ -57,6 +58,7 @@ _KIND_ICONS = {
     CURVE: QgsLayerItem.iconLine,
     SURFACE: QgsLayerItem.iconPolygon,
     GRID2D: QgsLayerItem.iconRaster,
+    GEOIMAGE: QgsLayerItem.iconRaster,
 }
 
 

@@ -23,6 +23,7 @@ POINTS = "Points"
 CURVE = "Curve"
 SURFACE = "Surface"
 GRID2D = "Grid2D"
+GEOIMAGE = "GeoImage"
 UNSUPPORTED = "Unsupported"
 GROUP = "Group"
 # RootGroup shares the NoType group type UID (geoh5py groups/notype.py).
@@ -33,7 +34,9 @@ OBJECT_KINDS = {
     "{6a057fdc-b355-11e3-95be-fd84a7ffcb88}": CURVE,
     "{f26feba3-aded-494b-b9e9-b2bbcbe298e1}": SURFACE,
     "{48f5054a-1c5c-4ca4-9048-80f36dc60a06}": GRID2D,
+    "{77ac043c-fe8d-4d14-8167-75e300fb835a}": GEOIMAGE,
 }
+GEOIMAGE_DATA_NAME = "GeoImageMesh_Image"
 
 # No-data sentinels used by GEOSCIENCE ANALYST / geoh5py (geoh5py/shared/__init__.py).
 FLOAT_NDV = 1.17549435e-38
@@ -45,6 +48,8 @@ ATTRIBUTE_PRIMITIVES = frozenset({"Float", "Integer", "Referenced", "Text", "Boo
 NUMERIC_PRIMITIVES = frozenset({"Float", "Integer", "Boolean"})
 # Grids with |dip| below this (degrees) count as horizontal (absorbs float noise).
 DIP_TOLERANCE = 1e-6
+# GeoImage corner checks, relative to the image's largest horizontal extent.
+CORNER_TOLERANCE = 1e-6
 
 _COMPOUND_FORMATS = {
     gdal.GDT_Float64: "<f8",
@@ -62,6 +67,15 @@ class ObjectInfo:
     name: str
     kind: str
     type_uid: str
+
+
+@dataclass(frozen=True)
+class GeoImageInfo:
+    """A GeoImage: four corners (TL, TR, BR, BL) and where its image file is."""
+
+    corners: np.ndarray
+    blob_path: str | None
+    file_name: str | None
 
 
 @dataclass(frozen=True)
@@ -374,6 +388,44 @@ def tree_objects(nodes: list[TreeNode] | tuple[TreeNode, ...]) -> list[TreeNode]
     ]
 
 
+def read_geoimage(workspace: Workspace, object_uid: str) -> GeoImageInfo:
+    """Read a GeoImage's corners and locate its embedded image file.
+
+    The image bytes are an opaque HDF5 dataset that GDAL cannot read; pass
+    ``blob_path`` to hdf5_blob.read_blob().
+
+    Args:
+        workspace: Project group from open_workspace().
+        object_uid: Object group name of a GeoImage.
+
+    Returns:
+        Corners as a (4, 3) array (top-left, top-right, bottom-right,
+        bottom-left) and the image dataset's HDF5 path and file name, which
+        are None if the object has no image.
+
+    Raises:
+        KeyError: If the object or its vertices do not exist.
+    """
+    corners = read_vertices(workspace, object_uid)
+    image = next(
+        (
+            d
+            for d in list_data(workspace, object_uid)
+            if d.name == GEOIMAGE_DATA_NAME and d.primitive_type == "Filename"
+        ),
+        None,
+    )
+    if image is None:
+        return GeoImageInfo(corners, None, None)
+    data = _data(workspace, image.uid)
+    names = _array(data, "Data").Read()
+    file_name = str(names[0] if isinstance(names, list) else names)
+    if file_name not in (data.GetMDArrayNames() or []):
+        return GeoImageInfo(corners, None, file_name)
+    blob_path = f"{workspace.GetFullName()}/Data/{image.uid}/{file_name}"
+    return GeoImageInfo(corners, blob_path, file_name)
+
+
 def is_horizontal(frame: Grid2DFrame) -> bool:
     """Whether a Grid2D lies flat, so it can be shown as a map raster.
 
@@ -401,6 +453,8 @@ def load_issue(workspace: Workspace, info: ObjectInfo) -> str | None:
     """
     if info.kind == UNSUPPORTED:
         return "object type not supported yet"
+    if info.kind == GEOIMAGE:
+        return _geoimage_issue(read_geoimage(workspace, info.uid))
     if info.kind != GRID2D:
         return None
     frame = read_grid2d_frame(workspace, info.uid)
@@ -440,6 +494,23 @@ def read_crs(workspace: Workspace, object_uid: str) -> str | None:
     crs = metadata.get("Coordinate Reference System", {}).get("Current", {})
     code = crs.get("Code") if isinstance(crs, dict) else None
     return code if code and code.lower() != "unknown" else None
+
+
+def _geoimage_issue(image: GeoImageInfo) -> str | None:
+    corners = image.corners
+    if image.blob_path is None:
+        return "GeoImage has no embedded image"
+    if corners.shape != (4, 3):
+        return f"GeoImage has {len(corners)} corners, expected 4"
+    size = float(np.ptp(corners[:, :2], axis=0).max()) or 1.0
+    if np.ptp(corners[:, 2]) > CORNER_TOLERANCE * size:
+        return "tilted GeoImage: only horizontal images can be shown on the map"
+    top_left, top_right, bottom_right, bottom_left = corners[:, :2]
+    if not np.allclose(
+        bottom_right, top_right + bottom_left - top_left, atol=CORNER_TOLERANCE * size
+    ):
+        return "GeoImage corners do not form a parallelogram (warped image)"
+    return None
 
 
 def _child_nodes(

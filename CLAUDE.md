@@ -54,3 +54,9 @@ Background research and decisions: `docs/research/geoh5-qgis-plugin-research.md`
   without vertex data use a single MultiPolygonZ feature instead.
 - Rotated rasters are drawn through an on-the-fly north-up warp; test raster placement
   with GDAL on the file, not by sampling the QGIS layer.
+- GeoImage image files are HDF5 **opaque** datasets that GDAL multidim cannot open.
+  `hdf5_blob.read_blob` reads them via ctypes against the HDF5 library GDAL already
+  loaded (requires a thread-safe build; QGIS's is). This is the only direct HDF5 use.
+- `QgsMeshLayer3DRenderer` is not exposed to Python in 4.2: the mesh 3D renderer is
+  built from XML via `QgsApplication.renderer3DRegistry()` (call `Qgs3D.initialize()`
+  outside the desktop app). There is no Python offscreen 3D engine for testing.

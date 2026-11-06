@@ -6,7 +6,7 @@ import h5py
 import numpy as np
 import pytest
 from geoh5py.groups import ContainerGroup
-from geoh5py.objects import Curve, Grid2D, Points, Surface
+from geoh5py.objects import Curve, GeoImage, Grid2D, Points, Surface
 from geoh5py.workspace import Workspace
 
 CRS_METADATA = {
@@ -39,6 +39,14 @@ SURFACE_VERTICES = np.array(
 )
 SURFACE_CELLS = np.array([[0, 1, 2], [1, 3, 2]], dtype=np.uint32)
 SHADED_VERTEX_VALUES = np.array([1.0, np.nan, 3.0, 4.0])
+# 3 rows x 4 columns RGB; pixel (row, col) = (10*row, 10*col, 200).
+IMAGE_PIXELS = np.array(
+    [[[10 * r, 10 * c, 200] for c in range(4)] for r in range(3)], dtype=np.uint8
+)
+# Corners: top-left, top-right, bottom-right, bottom-left (geoh5py order).
+IMAGE_CORNERS = np.array(
+    [[100.0, 530.0, 5.0], [140.0, 530.0, 5.0], [140.0, 500.0, 5.0], [100.0, 500.0, 5.0]]
+)
 GRID_KWARGS = {
     "origin": [1000.0, 2000.0, 50.0],
     "u_cell_size": 10.0,
@@ -151,6 +159,18 @@ def rootless_tree_file(tmp_path: Path) -> Path:
         root_id = root_id.decode() if isinstance(root_id, bytes) else root_id
         del project["Root"]
         del project["Groups"][root_id]
+    return path
+
+
+@pytest.fixture(scope="session")
+def image_file(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """GeoImages: 'photo' (flat, 4x3 RGB) and 'tilted' (corners at varying z)."""
+    path = tmp_path_factory.mktemp("geoh5") / "images.geoh5"
+    with Workspace.create(path) as ws:
+        GeoImage.create(ws, name="photo", image=IMAGE_PIXELS, vertices=IMAGE_CORNERS)
+        tilted = IMAGE_CORNERS.copy()
+        tilted[:2, 2] += 50.0  # top edge raised
+        GeoImage.create(ws, name="tilted", image=IMAGE_PIXELS, vertices=tilted)
     return path
 
 

@@ -27,8 +27,10 @@ from qgis.core import (
 from qgis.PyQt.QtCore import QMetaType
 from qgis.PyQt.QtXml import QDomDocument
 
+from geoh5_qgis.hdf5_blob import read_blob
 from geoh5_qgis.reader import (
     CURVE,
+    GEOIMAGE,
     GRID2D,
     INTEGER_NDV,
     POINTS,
@@ -41,6 +43,7 @@ from geoh5_qgis.reader import (
     read_attributes,
     read_cells,
     read_crs,
+    read_geoimage,
     read_grid2d_frame,
     read_vertices,
 )
@@ -91,7 +94,7 @@ def load_object_layers(
         if info is None:
             raise KeyError(f"No object {object_uid!r} in {path}")
         crs = crs or read_crs(workspace, object_uid)
-        layers = _build_layers(workspace, info.kind, info.name, object_uid, crs)
+        layers = _build_layers(workspace, path, info.kind, info.name, object_uid, crs)
     for layer in layers:
         layer.setCustomProperty(PATH_PROPERTY, str(path))
         layer.setCustomProperty(UID_PROPERTY, object_uid)
@@ -119,7 +122,12 @@ def load_object_layer(
 
 
 def _build_layers(
-    workspace: Workspace, kind: str, name: str, uid: str, crs: str | None
+    workspace: Workspace,
+    path: str | Path,
+    kind: str,
+    name: str,
+    uid: str,
+    crs: str | None,
 ) -> list[QgsMapLayer]:
     if kind == POINTS:
         vertices = read_vertices(workspace, uid)
@@ -150,6 +158,13 @@ def _build_layers(
         n_cells = frame.u_count * frame.v_count
         bands = _numeric(read_attributes(workspace, uid, "Cell", n_cells))
         return [grid2d_layer(name, uid, frame, bands, crs)]
+    if kind == GEOIMAGE:
+        image = read_geoimage(workspace, uid)
+        if image.blob_path is None:
+            raise ValueError(f"GeoImage {name!r} has no embedded image")
+        image_bytes = read_blob(path, image.blob_path)
+        suffix = Path(image.file_name or "").suffix or ".img"
+        return [geoimage_layer(name, uid, image.corners, image_bytes, suffix, crs)]
     raise ValueError(f"Object {name!r} has unsupported kind {kind!r}")
 
 
@@ -422,6 +437,82 @@ def grid2d_layer(
     if crs:
         layer.setCrs(QgsCoordinateReferenceSystem(crs))
     return layer
+
+
+def geoimage_layer(
+    name: str,
+    uid: str,
+    corners: np.ndarray,
+    image_bytes: bytes,
+    suffix: str,
+    crs: str | None,
+) -> QgsRasterLayer:
+    """Build a raster layer for a horizontal GeoImage.
+
+    The embedded image file is placed in /vsimem and wrapped in a VRT that
+    carries the corner-derived geotransform and CRS, so GDAL decodes the
+    original JPEG/PNG/TIFF on demand.
+
+    Args:
+        name: Layer name.
+        uid: Object UID, used to name the in-memory files.
+        corners: (4, 3) corners: top-left, top-right, bottom-right, bottom-left.
+        image_bytes: The embedded image file's bytes.
+        suffix: File extension of the embedded image (e.g. ``.jpg``).
+        crs: CRS string, or None to leave it unset.
+
+    Returns:
+        A raster layer backed by a VRT in /vsimem.
+
+    Raises:
+        RuntimeError: If GDAL cannot decode the image.
+    """
+    stem = f"{VSIMEM_DIR}/{uid.strip('{}')}_{next(_raster_counter)}"
+    image_path, vrt_path = f"{stem}{suffix}", f"{stem}.vrt"
+    with gdal.ExceptionMgr(useExceptions=True):
+        gdal.FileFromMemBuffer(image_path, image_bytes)
+        source = gdal.Open(image_path)
+        vrt = gdal.Translate(vrt_path, source, format="VRT")
+        vrt.SetGeoTransform(
+            geoimage_geotransform(corners, source.RasterXSize, source.RasterYSize)
+        )
+        if crs:
+            srs = osr.SpatialReference()
+            srs.SetFromUserInput(crs)
+            vrt.SetProjection(srs.ExportToWkt())
+        vrt.FlushCache()
+        del vrt, source
+    layer = QgsRasterLayer(vrt_path, name, "gdal")
+    if crs:
+        layer.setCrs(QgsCoordinateReferenceSystem(crs))
+    return layer
+
+
+def geoimage_geotransform(
+    corners: np.ndarray, width: int, height: int
+) -> tuple[float, ...]:
+    """GDAL geotransform mapping image pixels onto a GeoImage's corners.
+
+    Args:
+        corners: (4, 3) corners: top-left, top-right, bottom-right, bottom-left
+            (geoh5py's order; pixel (0, 0) is the top-left of the image).
+        width: Image width in pixels.
+        height: Image height in pixels.
+
+    Returns:
+        The six geotransform coefficients.
+    """
+    top_left, top_right, _, bottom_left = corners[:, :2].astype(float)
+    column_step = (top_right - top_left) / width
+    row_step = (bottom_left - top_left) / height
+    return (
+        float(top_left[0]),
+        float(column_step[0]),
+        float(row_step[0]),
+        float(top_left[1]),
+        float(column_step[1]),
+        float(row_step[1]),
+    )
 
 
 def grid2d_geotransform(frame: Grid2DFrame) -> tuple[float, ...]:
