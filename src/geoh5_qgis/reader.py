@@ -36,6 +36,9 @@ OBJECT_KINDS = {
 FLOAT_NDV = 1.17549435e-38
 INTEGER_NDV = -2147483648
 
+# Data primitive types that map to attribute columns.
+ATTRIBUTE_PRIMITIVES = frozenset({"Float", "Integer", "Referenced", "Text", "Boolean"})
+
 _COMPOUND_FORMATS = {
     gdal.GDT_Float64: "<f8",
     gdal.GDT_Float32: "<f4",
@@ -265,6 +268,42 @@ def read_value_map(workspace: Workspace, data_uid: str) -> dict[int, str] | None
     return {int(k): str(n) for k, n in zip(keys, names, strict=True)}
 
 
+def read_attributes(
+    workspace: Workspace, object_uid: str, association: str, length: int
+) -> dict[str, np.ndarray]:
+    """Read an object's data channels as attribute columns.
+
+    Referenced (categorical) keys are replaced by their value-map names. Channels
+    with an unsupported primitive type or the wrong length are skipped. Duplicate
+    channel names get a numeric suffix.
+
+    Args:
+        workspace: Project group from open_workspace().
+        object_uid: Object group name.
+        association: Which channels to read, e.g. ``"Vertex"`` or ``"Cell"``.
+        length: Expected number of values (vertices or cells).
+
+    Returns:
+        Column name to 1-D array, in file order.
+
+    Raises:
+        KeyError: If the object does not exist.
+    """
+    columns: dict[str, np.ndarray] = {}
+    for info in list_data(workspace, object_uid):
+        if info.association != association:
+            continue
+        if info.primitive_type not in ATTRIBUTE_PRIMITIVES:
+            continue
+        values = read_data_values(workspace, info.uid)
+        if values.shape != (length,):
+            continue
+        if info.primitive_type == "Referenced":
+            values = _map_values(values, read_value_map(workspace, info.uid) or {})
+        columns[_unique_name(info.name, columns)] = values
+    return columns
+
+
 def read_crs(workspace: Workspace, object_uid: str) -> str | None:
     """Read an object's coordinate reference system code from its metadata.
 
@@ -290,6 +329,15 @@ def read_crs(workspace: Workspace, object_uid: str) -> str | None:
     crs = metadata.get("Coordinate Reference System", {}).get("Current", {})
     code = crs.get("Code") if isinstance(crs, dict) else None
     return code if code and code.lower() != "unknown" else None
+
+
+def _map_values(keys: np.ndarray, value_map: dict[int, str]) -> np.ndarray:
+    return np.array([value_map.get(int(k), str(k)) for k in keys], dtype=object)
+
+
+def _unique_name(name: str, taken: dict[str, object]) -> str:
+    candidates = (name if i == 1 else f"{name}_{i}" for i in range(1, len(taken) + 2))
+    return next(c for c in candidates if c not in taken)
 
 
 def _object_info(uid: str, obj: gdal.Group) -> ObjectInfo:
