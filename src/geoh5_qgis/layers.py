@@ -46,6 +46,7 @@ VSIMEM_DIR = "/vsimem/geoh5_qgis"
 WKB_POINT_Z = 1001
 WKB_LINESTRING_Z = 1002
 WKB_POLYGON_Z = 1003
+WKB_MULTIPOLYGON_Z = 1006
 
 _raster_counter = itertools.count()
 
@@ -156,7 +157,10 @@ def surface_layer(
     attributes: dict[str, np.ndarray],
     crs: str | None,
 ) -> QgsVectorLayer:
-    """Build a PolygonZ memory layer with one triangle per feature.
+    """Build a memory layer of a triangulated surface.
+
+    With per-triangle attributes, each triangle is a PolygonZ feature. Without
+    them, the whole surface is a single MultiPolygonZ feature.
 
     Args:
         name: Layer name.
@@ -169,6 +173,11 @@ def surface_layer(
         The memory layer.
     """
     rings = vertices[np.column_stack([cells, cells[:, 0]])]  # closed: (m, 4, 3)
+    if not attributes:
+        # One feature for the whole surface: far faster and lighter than one
+        # feature per triangle, and nothing per-triangle to show anyway.
+        multi = _from_wkb(_wkb_multi(WKB_MULTIPOLYGON_Z, WKB_POLYGON_Z, (1, 4), rings))
+        return _vector_layer("MultiPolygonZ", name, crs, [multi], {})
     geometries = _wkb_geometries(WKB_POLYGON_Z, (1, 4), rings)
     return _vector_layer("PolygonZ", name, crs, geometries, attributes)
 
@@ -315,6 +324,24 @@ def _wkb_geometries(
     Returns:
         n geometries.
     """
+    raw = _wkb_records(type_code, counts, coords)
+    size = len(raw) // len(coords) if len(coords) else 0
+    return [_from_wkb(raw[i * size : (i + 1) * size]) for i in range(len(coords))]
+
+
+def _wkb_multi(
+    multi_code: int, type_code: int, counts: tuple[int, ...], coords: np.ndarray
+) -> bytes:
+    """ISO WKB of a multi-geometry whose parts are the rows of ``coords``."""
+    header = (
+        np.array([1], "u1").tobytes()
+        + np.array([multi_code, len(coords)], "<u4").tobytes()
+    )
+    return header + _wkb_records(type_code, counts, coords)
+
+
+def _wkb_records(type_code: int, counts: tuple[int, ...], coords: np.ndarray) -> bytes:
+    """Concatenated little-endian ISO WKB, one geometry per row of ``coords``."""
     n, k, _ = coords.shape
     dtype = np.dtype(
         [("order", "u1"), ("type", "<u4")]
@@ -326,8 +353,7 @@ def _wkb_geometries(
     for i, count in enumerate(counts):
         records[f"count{i}"] = count
     records["xyz"] = coords
-    raw, size = records.tobytes(), dtype.itemsize
-    return [_from_wkb(raw[i * size : (i + 1) * size]) for i in range(n)]
+    return records.tobytes()
 
 
 def _from_wkb(wkb: bytes) -> QgsGeometry:

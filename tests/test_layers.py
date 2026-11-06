@@ -96,14 +96,33 @@ def test_curve_layer(geoh5_file: Path) -> None:
     ]
 
 
-def test_surface_layer(geoh5_file: Path) -> None:
+def ring_coords(polygon) -> list[tuple[float, float, float]]:
+    return [(p.x(), p.y(), p.z()) for p in polygon.exteriorRing().vertices()]
+
+
+FIRST_TRIANGLE = [tuple(SURFACE_VERTICES[i]) for i in [0, 1, 2, 0]]
+
+
+def test_surface_without_cell_data_is_one_multipolygon(geoh5_file: Path) -> None:
     layer = load_object_layer(geoh5_file, uid_of(geoh5_file, "topo"))
+    assert layer.wkbType() == QgsWkbTypes.Type.MultiPolygonZ
+    assert layer.featureCount() == 1
+    assert len(layer.fields()) == 0
+    multi = next(layer.getFeatures()).geometry().constGet()
+    assert multi.numGeometries() == len(SURFACE_CELLS)
+    assert ring_coords(multi.geometryN(0)) == FIRST_TRIANGLE
+
+
+def test_surface_with_cell_data_has_one_feature_per_triangle(
+    geoh5_file: Path,
+) -> None:
+    layer = load_object_layer(geoh5_file, uid_of(geoh5_file, "zoned"))
     assert layer.wkbType() == QgsWkbTypes.Type.PolygonZ
     assert layer.featureCount() == len(SURFACE_CELLS)
-    ring = next(layer.getFeatures()).geometry().constGet().exteriorRing()
-    coords = [(p.x(), p.y(), p.z()) for p in ring.vertices()]
-    expected = [tuple(SURFACE_VERTICES[i]) for i in [0, 1, 2, 0]]
-    assert coords == expected
+    assert [r["zone"] for r in attribute_rows(layer)] == [7.0, 8.0]
+    assert ring_coords(next(layer.getFeatures()).geometry().constGet()) == (
+        FIRST_TRIANGLE
+    )
 
 
 def assert_raster_matches_geoh5py(path: Path, name: str, data_name: str) -> None:

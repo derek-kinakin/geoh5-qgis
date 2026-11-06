@@ -48,6 +48,7 @@ def test_list_objects_identifies_kinds(geoh5_file: Path) -> None:
         "pts": "Points",
         "line": "Curve",
         "topo": "Surface",
+        "zoned": "Surface",
         "grid": "Grid2D",
     }
 

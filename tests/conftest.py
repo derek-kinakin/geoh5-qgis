@@ -71,6 +71,12 @@ def geoh5_file(tmp_path_factory: pytest.TempPathFactory) -> Path:
             {"seg_id": {"values": np.array([1.0, 2.0, 3.0]), "association": "CELL"}}
         )
         Surface.create(ws, name="topo", vertices=SURFACE_VERTICES, cells=SURFACE_CELLS)
+        zoned = Surface.create(
+            ws, name="zoned", vertices=SURFACE_VERTICES, cells=SURFACE_CELLS
+        )
+        zoned.add_data(
+            {"zone": {"values": np.array([7.0, 8.0]), "association": "CELL"}}
+        )
         grid = Grid2D.create(ws, name="grid", **GRID_KWARGS)
         grid.add_data(
             {
