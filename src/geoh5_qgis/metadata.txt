@@ -1,0 +1,16 @@
+[general]
+name=geoh5 Browser
+qgisMinimumVersion=4.0
+qgisMaximumVersion=4.99
+description=Browse geoh5 (GEOSCIENCE ANALYST) files and add their objects as layers.
+about=Expands .geoh5 files in the Browser panel and loads Points, Curve, Surface and Grid2D objects as in-memory layers, keeping the geoh5 file as the source of truth. Reads files with GDAL, which ships with QGIS; no extra Python packages are needed.
+version=0.0.1
+author=Derek Kinakin
+email=89031238+derek-kinakin@users.noreply.github.com
+repository=https://github.com/derek-kinakin/geoh5-qgis
+tracker=https://github.com/derek-kinakin/geoh5-qgis/issues
+tags=geoh5,geoscience,analyst,mira,hdf5,3d,mining,geology
+category=Plugins
+experimental=True
+deprecated=False
+hasProcessingProvider=no

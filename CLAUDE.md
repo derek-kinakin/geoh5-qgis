@@ -23,6 +23,10 @@ Background research and decisions: `docs/research/geoh5-qgis-plugin-research.md`
   DLL "procedure could not be found" error.
 - Tests: `mamba run -n geoh5-qgis pytest`
 - Lint/format: `mamba run -n geoh5-qgis ruff check --fix . && mamba run -n geoh5-qgis ruff format .`
+- Run in the real QGIS: set `QGIS_PLUGINPATH=C:\Users\dkinakin\Dev\geoh5-qgis\src` and start
+  QGIS 4.2.3 (standalone or the env's `qgis.exe`), then enable "geoh5 Browser" in the
+  Plugin Manager. The plugin package is `src/geoh5_qgis` (entry: `classFactory` in
+  `__init__.py`, metadata in `metadata.txt`).
 - Tests build fixtures with geoh5py in `tmp_path`. Some tests also use the sample files in
   `C:\Users\dkinakin\Dev\geoh5vista\assets` and are skipped if that folder is missing.
 
