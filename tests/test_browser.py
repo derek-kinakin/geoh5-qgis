@@ -1,11 +1,13 @@
 """Tests for the Browser panel integration (needs QGIS via pytest-qgis)."""
 
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-from qgis.core import Qgis, QgsProject
+from qgis.core import Qgis, QgsProject, QgsTask
 from qgis.gui import QgsDataItemGuiContext
+from qgis.PyQt.QtCore import QCoreApplication
 
 from geoh5_qgis.browser import (
     PROVIDER_KEY,
@@ -16,6 +18,7 @@ from geoh5_qgis.browser import (
     Geoh5GroupItem,
     Geoh5ObjectItem,
     add_objects,
+    add_objects_in_background,
     loadable_object_uids,
     parse_object_uri,
 )
@@ -99,7 +102,7 @@ def test_double_click_adds_object_layer(geoh5_file: Path, project: QgsProject) -
         item, QgsDataItemGuiContext()
     )
     assert handled is True
-    assert [layer.name() for layer in project.mapLayers().values()] == ["topo"]
+    assert layer_names_when_loaded(project, 1) == ["topo"]
 
 
 def test_double_click_ignores_other_items(geoh5_file: Path) -> None:
@@ -115,7 +118,7 @@ def test_drop_handler_adds_layer(geoh5_file: Path, project: QgsProject) -> None:
     handler = Geoh5DropHandler()
     assert handler.customUriProviderKey() == PROVIDER_KEY
     handler.handleCustomUriDrop(uri)
-    assert [layer.name() for layer in project.mapLayers().values()] == ["grid"]
+    assert layer_names_when_loaded(project, 1) == ["grid"]
 
 
 def test_add_objects_adds_every_layer_of_an_object(
@@ -198,3 +201,40 @@ def test_add_all_uses_the_tree_not_the_flat_index(orphan_tree_file: Path) -> Non
     uids = loadable_object_uids(orphan_tree_file)
     assert uid_of(orphan_tree_file, "top_pts") not in uids
     assert len(uids) == 2
+
+
+def layer_names_when_loaded(
+    project: QgsProject, count: int, timeout: float = 60.0
+) -> list[str]:
+    """Process Qt events until the project has ``count`` layers (background load)."""
+    deadline = time.monotonic() + timeout
+    while len(project.mapLayers()) < count and time.monotonic() < deadline:
+        QCoreApplication.processEvents()
+        time.sleep(0.01)
+    QCoreApplication.processEvents()
+    return sorted(layer.name() for layer in project.mapLayers().values())
+
+
+def test_background_load_adds_layers_and_reports_errors(
+    geoh5_file: Path, project: QgsProject
+) -> None:
+    bar = MagicMock()
+    uids = [uid_of(geoh5_file, "line"), "{00000000-0000-0000-0000-000000000000}"]
+    task = add_objects_in_background(geoh5_file, uids, project, bar)
+    assert isinstance(task, QgsTask)
+    assert layer_names_when_loaded(project, 2) == ["line", "line vertices"]
+    deadline = time.monotonic() + 10
+    while not bar.pushWarning.called and time.monotonic() < deadline:
+        QCoreApplication.processEvents()
+    assert "0000" in bar.pushWarning.call_args.args[1]
+    main = QCoreApplication.instance().thread()
+    assert all(layer.thread() is main for layer in project.mapLayers().values())
+
+
+def test_background_load_of_a_mesh_and_raster(
+    geoh5_file: Path, project: QgsProject
+) -> None:
+    uids = [uid_of(geoh5_file, "shaded"), uid_of(geoh5_file, "grid")]
+    add_objects_in_background(geoh5_file, uids, project)
+    assert layer_names_when_loaded(project, 2) == ["grid", "shaded"]
+    assert all(layer.isValid() for layer in project.mapLayers().values())

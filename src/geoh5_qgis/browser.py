@@ -15,6 +15,7 @@ from pathlib import Path
 
 from qgis.core import (
     Qgis,
+    QgsApplication,
     QgsDataCollectionItem,
     QgsDataItem,
     QgsDataItemProvider,
@@ -23,8 +24,10 @@ from qgis.core import (
     QgsMapLayer,
     QgsMimeDataUtils,
     QgsProject,
+    QgsTask,
 )
 from qgis.gui import QgsCustomDropHandler, QgsDataItemGuiProvider
+from qgis.PyQt.QtCore import QCoreApplication
 from qgis.PyQt.QtGui import QAction
 
 from geoh5_qgis.layers import load_object_layers
@@ -42,6 +45,8 @@ from geoh5_qgis.reader import (
     read_tree,
     tree_objects,
 )
+
+_RUNNING_TASKS: set[QgsTask] = set()
 
 PROVIDER_KEY = "geoh5"
 URI_SEPARATOR = "|"
@@ -73,6 +78,73 @@ def add_objects(
     layers = [layer for r in results if isinstance(r, list) for layer in r]
     errors = [r for r in results if isinstance(r, str)]
     project.addMapLayers(layers)
+    return layers, errors
+
+
+def add_objects_in_background(
+    path: str | Path,
+    uids: list[str],
+    project: QgsProject,
+    message_bar=None,
+) -> QgsTask:
+    """Load geoh5 objects in a background task, then add them to a project.
+
+    Layers are built in a worker thread (shown in QGIS's task bar, with
+    progress and cancel) and moved to the main thread; they are added to the
+    project when the task finishes. Errors go to ``message_bar`` if given.
+
+    Args:
+        path: Path to the .geoh5 file.
+        uids: Object group names to load.
+        project: Project to add the layers to.
+        message_bar: A QgsMessageBar for errors, or None.
+
+    Returns:
+        The started task.
+    """
+
+    def finished(exception, result=None) -> None:
+        _RUNNING_TASKS.discard(task)
+        if exception is not None:
+            _report([f"{Path(path).name}: {exception}"], message_bar)
+            return
+        if result is None:  # cancelled
+            return
+        layers, errors = result
+        project.addMapLayers(layers)
+        _report(errors, message_bar)
+
+    count = f"{len(uids)} object{'s' if len(uids) != 1 else ''}"
+    task = QgsTask.fromFunction(
+        f"Loading {count} from {Path(path).name}",
+        _load_in_task,
+        str(path),
+        list(uids),
+        on_finished=finished,
+    )
+    _RUNNING_TASKS.add(task)  # keep the Python wrapper alive until it finishes
+    QgsApplication.taskManager().addTask(task)
+    return task
+
+
+def _load_in_task(
+    task: QgsTask, path: str, uids: list[str]
+) -> tuple[list[QgsMapLayer], list[str]] | None:
+    """Task body (worker thread): build layers and hand them to the main thread."""
+    main_thread = QCoreApplication.instance().thread()
+    layers: list[QgsMapLayer] = []
+    errors: list[str] = []
+    for index, uid in enumerate(uids, start=1):
+        if task.isCanceled():
+            return None
+        result = _try_load(path, uid)
+        if isinstance(result, str):
+            errors.append(result)
+        else:
+            for layer in result:
+                layer.moveToThread(main_thread)
+            layers.extend(result)
+        task.setProgress(100.0 * index / len(uids))
     return layers, errors
 
 
@@ -242,8 +314,9 @@ class Geoh5DataItemGuiProvider(QgsDataItemGuiProvider):
         if item.issue:
             _report([f"{item.name()}: {item.issue}"], context.messageBar())
             return True
-        _, errors = add_objects(item.file_path, [item.uid], QgsProject.instance())
-        _report(errors, context.messageBar())
+        add_objects_in_background(
+            item.file_path, [item.uid], QgsProject.instance(), context.messageBar()
+        )
         return True
 
     def populateContextMenu(self, item, menu, selectedItems, context) -> None:
@@ -279,19 +352,19 @@ class Geoh5DropHandler(QgsCustomDropHandler):
 
     def handleCustomUriDrop(self, uri: QgsMimeDataUtils.Uri) -> None:
         path, uid = parse_object_uri(uri.uri)
-        add_objects(path, [uid], QgsProject.instance())
+        add_objects_in_background(
+            path, [uid], QgsProject.instance(), _main_message_bar()
+        )
 
 
 def _add_items(items: list[Geoh5ObjectItem], context) -> None:
     by_file: dict[str, list[str]] = {}
     for item in items:
         by_file.setdefault(item.file_path, []).append(item.uid)
-    errors = [
-        error
-        for path, uids in by_file.items()
-        for error in add_objects(path, uids, QgsProject.instance())[1]
-    ]
-    _report(errors, context.messageBar())
+    for path, uids in by_file.items():
+        add_objects_in_background(
+            path, uids, QgsProject.instance(), context.messageBar()
+        )
 
 
 def read_file_contents(
@@ -360,8 +433,21 @@ def _safe_issue(workspace, node: TreeNode) -> str | None:
 
 
 def _add_group(item: "Geoh5GroupItem", context) -> None:
-    _, errors = add_objects(item.file_path, item.loadable_uids(), QgsProject.instance())
-    _report(errors, context.messageBar())
+    add_objects_in_background(
+        item.file_path,
+        item.loadable_uids(),
+        QgsProject.instance(),
+        context.messageBar(),
+    )
+
+
+def _main_message_bar():
+    """QGIS's main message bar when running in the desktop app, else None."""
+    try:
+        from qgis.utils import iface
+    except ImportError:
+        return None
+    return iface.messageBar() if iface is not None else None
 
 
 def _add_file(path: str, context) -> None:
@@ -370,5 +456,4 @@ def _add_file(path: str, context) -> None:
     except (RuntimeError, ValueError, FileNotFoundError) as exc:
         _report([f"{Path(path).name}: {exc}"], context.messageBar())
         return
-    _, errors = add_objects(path, uids, QgsProject.instance())
-    _report(errors, context.messageBar())
+    add_objects_in_background(path, uids, QgsProject.instance(), context.messageBar())
