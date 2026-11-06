@@ -9,7 +9,9 @@ objects to a QGIS project as in-memory layers.
 - To add an object to the project, double-click it, drag it onto the map, or right-click
   it and choose **Add Object to Project**.
 - Right-clicking a file gives **Add All Supported Objects to Project**.
-- Supported objects: Points, Curve, Surface and horizontal Grid2D.
+- Supported objects: Points, Curve, Surface and horizontal Grid2D. Surfaces with vertex
+  data load as mesh layers coloured by elevation; the other surfaces load as vector
+  layers.
 
 To try it, point `QGIS_PLUGINPATH` at this repo's `src` folder, start QGIS 4.x and enable
 **geoh5 Browser** in the Plugin Manager.

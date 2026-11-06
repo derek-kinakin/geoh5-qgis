@@ -39,3 +39,18 @@ Background research and decisions: `docs/research/geoh5-qgis-plugin-research.md`
   `GetView('["Key"]')` / `GetView('["Value"]')`.
 - Float no-data is `1.17549435e-38` (converted to NaN); integer no-data is `-2147483648`.
 - Some files have no `/Objects` group at all (e.g. drillhole-only files).
+
+## QGIS layer gotchas
+
+- Memory vector layers default to EPSG:4326 when the URI has no `crs=`; set an empty
+  `QgsCoordinateReferenceSystem()` when the geoh5 object has no CRS.
+- `mesh_memory` provider (surfaces with vertex data): vertices are **x,y only** (Z is
+  rejected), so elevation is added as a "Z" vertex dataset. Dataset type line is
+  `<vertex|face> scalar <name>` split on ASCII spaces, so names use non-breaking spaces
+  (`mesh_dataset_name` / `mesh_display_name`). The metadata section must be non-empty.
+  Renderer settings getters return copies: set them back after editing.
+- TIN geometry (`TINZ`) works in memory in 4.2.3 but QGIS cannot save it to GPKG,
+  FlatGeobuf, GeoJSON, Shapefile or DXF ("Feature geometry not imported"), so surfaces
+  without vertex data use a single MultiPolygonZ feature instead.
+- Rotated rasters are drawn through an on-the-fly north-up warp; test raster placement
+  with GDAL on the file, not by sampling the QGIS layer.

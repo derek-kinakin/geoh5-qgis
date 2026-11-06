@@ -35,6 +35,7 @@ SURFACE_VERTICES = np.array(
     [[0.0, 0.0, 0.0], [1.0, 0.0, 0.5], [0.0, 1.0, 1.0], [1.0, 1.0, 1.5]]
 )
 SURFACE_CELLS = np.array([[0, 1, 2], [1, 3, 2]], dtype=np.uint32)
+SHADED_VERTEX_VALUES = np.array([1.0, np.nan, 3.0, 4.0])
 GRID_KWARGS = {
     "origin": [1000.0, 2000.0, 50.0],
     "u_cell_size": 10.0,
@@ -76,6 +77,16 @@ def geoh5_file(tmp_path_factory: pytest.TempPathFactory) -> Path:
         )
         zoned.add_data(
             {"zone": {"values": np.array([7.0, 8.0]), "association": "CELL"}}
+        )
+        shaded = Surface.create(
+            ws, name="shaded", vertices=SURFACE_VERTICES, cells=SURFACE_CELLS
+        )
+        shaded.add_data(
+            {
+                "Residual mag": {"values": SHADED_VERTEX_VALUES},
+                "zone": {"values": np.array([7.0, 8.0]), "association": "CELL"},
+                "label": {"type": "text", "values": np.array(["a", "b", "c", "d"])},
+            }
         )
         grid = Grid2D.create(ws, name="grid", **GRID_KWARGS)
         grid.add_data(

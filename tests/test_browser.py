@@ -48,7 +48,7 @@ def test_provider_only_handles_geoh5_files(geoh5_file: Path, tmp_path: Path) -> 
 
 def test_file_item_lists_objects_sorted_by_name(geoh5_file: Path) -> None:
     items = object_items(geoh5_file)
-    assert list(items) == ["grid", "line", "pts", "topo", "zoned"]
+    assert list(items) == ["grid", "line", "pts", "shaded", "topo", "zoned"]
     assert all(isinstance(i, Geoh5ObjectItem) for i in items.values())
     assert items["pts"].kind == "Points"
     assert items["pts"].uid == uid_of(geoh5_file, "pts")

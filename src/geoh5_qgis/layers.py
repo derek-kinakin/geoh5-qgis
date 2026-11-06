@@ -1,6 +1,7 @@
 """Build in-memory QGIS layers from geoh5 objects.
 
-Vector objects become memory-provider layers. Grid2D objects become a GeoTIFF in
+Vector objects become memory-provider layers. Surfaces with vertex data become
+``mesh_memory`` mesh layers instead. Grid2D objects become a GeoTIFF in
 GDAL's in-memory filesystem (``/vsimem``) opened with the ``gdal`` provider. Each
 layer records its source file and object UID as custom properties, so the geoh5
 file stays the source of truth.
@@ -17,6 +18,7 @@ from qgis.core import (
     QgsField,
     QgsGeometry,
     QgsMapLayer,
+    QgsMeshLayer,
     QgsRasterLayer,
     QgsVectorLayer,
 )
@@ -42,6 +44,9 @@ from geoh5_qgis.reader import (
 PATH_PROPERTY = "geoh5/path"
 UID_PROPERTY = "geoh5/uid"
 VSIMEM_DIR = "/vsimem/geoh5_qgis"
+MESH_MEMORY_PROVIDER = "mesh_memory"
+ELEVATION_DATASET = "Z"
+NBSP = " "
 # ISO WKB geometry type codes (Z variants).
 WKB_POINT_Z = 1001
 WKB_LINESTRING_Z = 1002
@@ -63,7 +68,8 @@ def load_object_layer(
             the object's metadata, if any.
 
     Returns:
-        A QgsVectorLayer (Points, Curve, Surface) or QgsRasterLayer (Grid2D).
+        A QgsVectorLayer (Points, Curve, Surface), a QgsMeshLayer (Surface with
+        vertex data) or a QgsRasterLayer (Grid2D).
 
     Raises:
         KeyError: If the object does not exist.
@@ -87,17 +93,25 @@ def _build_layer(
         vertices = read_vertices(workspace, uid)
         attributes = read_attributes(workspace, uid, "Vertex", len(vertices))
         return points_layer(name, vertices, attributes, crs)
-    if kind in (CURVE, SURFACE):
+    if kind == CURVE:
         vertices = read_vertices(workspace, uid)
         cells = read_cells(workspace, uid)
         attributes = read_attributes(workspace, uid, "Cell", len(cells))
-        build = curve_layer if kind == CURVE else surface_layer
-        return build(name, vertices, cells, attributes, crs)
+        return curve_layer(name, vertices, cells, attributes, crs)
+    if kind == SURFACE:
+        vertices = read_vertices(workspace, uid)
+        cells = read_cells(workspace, uid)
+        cell_data = read_attributes(workspace, uid, "Cell", len(cells))
+        vertex_data = _numeric(read_attributes(workspace, uid, "Vertex", len(vertices)))
+        if vertex_data:
+            return surface_mesh_layer(
+                name, vertices, cells, vertex_data, _numeric(cell_data), crs
+            )
+        return surface_layer(name, vertices, cells, cell_data, crs)
     if kind == GRID2D:
         frame = read_grid2d_frame(workspace, uid)
         n_cells = frame.u_count * frame.v_count
-        attributes = read_attributes(workspace, uid, "Cell", n_cells)
-        bands = {k: v for k, v in attributes.items() if v.dtype != object}
+        bands = _numeric(read_attributes(workspace, uid, "Cell", n_cells))
         return grid2d_layer(name, uid, frame, bands, crs)
     raise ValueError(f"Object {name!r} has unsupported kind {kind!r}")
 
@@ -180,6 +194,89 @@ def surface_layer(
         return _vector_layer("MultiPolygonZ", name, crs, [multi], {})
     geometries = _wkb_geometries(WKB_POLYGON_Z, (1, 4), rings)
     return _vector_layer("PolygonZ", name, crs, geometries, attributes)
+
+
+def surface_mesh_layer(
+    name: str,
+    vertices: np.ndarray,
+    cells: np.ndarray,
+    vertex_data: dict[str, np.ndarray],
+    face_data: dict[str, np.ndarray],
+    crs: str | None,
+) -> QgsMeshLayer:
+    """Build an in-memory mesh layer for a surface with vertex data.
+
+    The ``mesh_memory`` provider stores 2D vertices only, so elevation is added
+    as the first vertex dataset (ELEVATION_DATASET), which is also the active
+    colouring and can drive elevation in 3D views.
+
+    Args:
+        name: Layer name.
+        vertices: (n, 3) x, y, z array.
+        cells: (m, 3) vertex indices of each triangle.
+        vertex_data: Dataset name to length-n numeric array.
+        face_data: Dataset name to length-m numeric array.
+        crs: CRS string, or None to leave it unset.
+
+    Returns:
+        The mesh layer.
+
+    Raises:
+        RuntimeError: If QGIS rejects the mesh or a dataset.
+    """
+    layer = QgsMeshLayer(_mesh_uri(vertices, cells), name, MESH_MEMORY_PROVIDER)
+    if not layer.isValid():
+        raise RuntimeError(f"QGIS could not build a mesh for surface {name!r}")
+    layer.setCrs(
+        QgsCoordinateReferenceSystem(crs) if crs else QgsCoordinateReferenceSystem()
+    )
+    datasets = [("vertex", ELEVATION_DATASET, vertices[:, 2])]
+    datasets += [("vertex", k, v) for k, v in vertex_data.items()]
+    datasets += [("face", k, v) for k, v in face_data.items()]
+    taken: set[str] = set()
+    for location, dataset_name, values in datasets:
+        unique = _unique(dataset_name, taken)
+        uri = _mesh_dataset_uri(location, unique, values)
+        if not layer.dataProvider().addDataset(uri):
+            raise RuntimeError(f"QGIS rejected dataset {unique!r} on {name!r}")
+    settings = layer.rendererSettings()
+    settings.setActiveScalarDatasetGroup(0)  # elevation
+    # Dense triangle wireframes swamp the colours; users can turn edges back on.
+    native = settings.nativeMeshSettings()
+    native.setEnabled(False)
+    settings.setNativeMeshSettings(native)
+    triangular = settings.triangularMeshSettings()
+    triangular.setEnabled(False)
+    settings.setTriangularMeshSettings(triangular)
+    layer.setRendererSettings(settings)
+    return layer
+
+
+def mesh_dataset_name(name: str) -> str:
+    """Encode a name for a mesh_memory dataset URI.
+
+    The provider splits its type line on ASCII spaces, so spaces become
+    non-breaking spaces (which display the same). Newlines are flattened.
+
+    Args:
+        name: Display name.
+
+    Returns:
+        The encoded name.
+    """
+    return " ".join(name.split()).replace(" ", NBSP)
+
+
+def mesh_display_name(name: str) -> str:
+    """Reverse mesh_dataset_name() for display or comparison.
+
+    Args:
+        name: A dataset group name as reported by QGIS.
+
+    Returns:
+        The name with non-breaking spaces turned back into spaces.
+    """
+    return name.replace(NBSP, " ")
 
 
 def grid2d_layer(
@@ -403,7 +500,47 @@ def _write_grid_tiff(
 
 def _grid_rows(values: np.ndarray, frame: Grid2DFrame) -> np.ndarray:
     """Reshape U-fastest cell values to raster rows, top (far-V) row first."""
-    grid = values.astype(np.float64)
+    return _as_float(values).reshape(frame.v_count, frame.u_count)[::-1]
+
+
+def _as_float(values: np.ndarray) -> np.ndarray:
+    """Numeric values as float64, with integer no-data as NaN."""
+    result = values.astype(np.float64)
     if values.dtype.kind in "iu":
-        grid[values == INTEGER_NDV] = np.nan
-    return grid.reshape(frame.v_count, frame.u_count)[::-1]
+        result[values == INTEGER_NDV] = np.nan
+    return result
+
+
+def _numeric(columns: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """Drop text and value-mapped (string) columns."""
+    return {k: v for k, v in columns.items() if v.dtype != object}
+
+
+def _unique(name: str, taken: set[str]) -> str:
+    candidates = (name if i == 1 else f"{name}_{i}" for i in itertools.count(1))
+    unique = next(c for c in candidates if c not in taken)
+    taken.add(unique)
+    return unique
+
+
+def _mesh_uri(vertices: np.ndarray, cells: np.ndarray) -> str:
+    """mesh_memory URI: ``x,y`` lines, ``---``, then ``i,j,k`` face lines."""
+    return f"{_csv_lines(vertices[:, :2])}\n---\n{_csv_lines(cells)}"
+
+
+def _mesh_dataset_uri(location: str, name: str, values: np.ndarray) -> str:
+    """mesh_memory dataset URI: type line, metadata, then time and values.
+
+    Sections are separated by ``---``; an empty metadata section would be
+    dropped by the provider's parser, so one metadata line is always written.
+    """
+    header = f"{location} scalar {mesh_dataset_name(name)}"
+    return f"{header}\n---\nsource: geoh5\n---\n0\n{_csv_lines(_as_float(values))}"
+
+
+def _csv_lines(array: np.ndarray) -> str:
+    """Comma-separated rows; floats use NumPy's shortest round-trip repr."""
+    text = np.asarray(array).astype(str)
+    if text.ndim == 1:
+        return "\n".join(text)
+    return "\n".join(",".join(row) for row in text)

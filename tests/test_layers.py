@@ -6,17 +6,32 @@ import numpy as np
 import pytest
 from geoh5py.workspace import Workspace as Geoh5pyWorkspace
 from osgeo import gdal
-from qgis.core import NULL, QgsPointXY, QgsRasterLayer, QgsVectorLayer, QgsWkbTypes
+from qgis.core import (
+    NULL,
+    QgsMeshDatasetGroupMetadata,
+    QgsMeshDatasetIndex,
+    QgsMeshLayer,
+    QgsPointXY,
+    QgsRasterLayer,
+    QgsVectorLayer,
+    QgsWkbTypes,
+)
 
 from conftest import (
     CURVE_CELLS,
     POINT_INTS,
     POINT_TEXT,
     POINT_VERTICES,
+    SHADED_VERTEX_VALUES,
     SURFACE_CELLS,
     SURFACE_VERTICES,
 )
-from geoh5_qgis.layers import curve_parts, load_object_layer
+from geoh5_qgis.layers import (
+    curve_parts,
+    load_object_layer,
+    mesh_dataset_name,
+    mesh_display_name,
+)
 from geoh5_qgis.reader import Grid2DFrame, list_objects, open_workspace
 
 ASSETS = Path(r"C:\Users\dkinakin\Dev\geoh5vista\assets")
@@ -170,3 +185,57 @@ def test_dipping_grid2d_is_rejected() -> None:
     frame = Grid2DFrame((0.0, 0.0, 0.0), 1.0, 1.0, 2, 2, 0.0, -35.0, False)
     with pytest.raises(ValueError, match="dip"):
         grid2d_layer("g", "{x}", frame, {"v": np.zeros(4)}, None)
+
+
+def mesh_groups(layer: QgsMeshLayer) -> dict[str, tuple[int, list[float]]]:
+    """Dataset group name -> (data type, values), with display names unescaped."""
+    provider = layer.dataProvider()
+    groups = {}
+    for group in range(provider.datasetGroupCount()):
+        meta = provider.datasetGroupMetadata(group)
+        index = QgsMeshDatasetIndex(group, 0)
+        count = (
+            provider.vertexCount()
+            if meta.dataType() == QgsMeshDatasetGroupMetadata.DataType.DataOnVertices
+            else provider.faceCount()
+        )
+        values = [provider.datasetValue(index, i).scalar() for i in range(count)]
+        groups[mesh_display_name(meta.name())] = (meta.dataType(), values)
+    return groups
+
+
+def test_surface_with_vertex_data_is_a_mesh(geoh5_file: Path) -> None:
+    layer = load_object_layer(geoh5_file, uid_of(geoh5_file, "shaded"))
+    assert isinstance(layer, QgsMeshLayer)
+    assert layer.isValid()
+    assert layer.name() == "shaded"
+    assert layer.dataProvider().vertexCount() == len(SURFACE_VERTICES)
+    assert layer.dataProvider().faceCount() == len(SURFACE_CELLS)
+    assert not layer.crs().isValid()
+    assert layer.customProperty("geoh5/uid") == uid_of(geoh5_file, "shaded")
+
+    on_vertices = QgsMeshDatasetGroupMetadata.DataType.DataOnVertices
+    on_faces = QgsMeshDatasetGroupMetadata.DataType.DataOnFaces
+    groups = mesh_groups(layer)
+    # Text data cannot be a mesh dataset and is skipped.
+    assert list(groups) == ["Z", "Residual mag", "zone"]
+    assert groups["Z"] == (on_vertices, SURFACE_VERTICES[:, 2].tolist())
+    kind, values = groups["Residual mag"]
+    assert kind == on_vertices
+    np.testing.assert_array_equal(values, SHADED_VERTEX_VALUES)  # NaN kept
+    assert groups["zone"] == (on_faces, [7.0, 8.0])
+
+
+def test_mesh_colours_by_elevation_by_default(geoh5_file: Path) -> None:
+    layer = load_object_layer(geoh5_file, uid_of(geoh5_file, "shaded"))
+    settings = layer.rendererSettings()
+    assert settings.activeScalarDatasetGroup() == 0
+    assert not settings.nativeMeshSettings().isEnabled()
+    assert not settings.triangularMeshSettings().isEnabled()
+
+
+def test_mesh_group_names_with_spaces_survive() -> None:
+    assert mesh_display_name(mesh_dataset_name("Residual Magnetic")) == (
+        "Residual Magnetic"
+    )
+    assert " " not in mesh_dataset_name("Residual Magnetic")
