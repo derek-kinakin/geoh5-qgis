@@ -1,0 +1,24 @@
+# Development environment for the geoh5-qgis plugin.
+#   mamba env create -f environment.yml
+#   mamba activate geoh5-qgis
+#
+# The plugin itself reads geoh5 with GDAL only (shipped with QGIS).
+# h5py/geoh5py are here for building and cross-checking test fixtures.
+name: geoh5-qgis
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - qgis=4.2.3
+  # qgis 4.2.3 (build _1) links against abseil lts_20260526; without this pin the
+  # solver picks libabseil 20260817 and `import qgis.core` fails with
+  # "DLL load failed ... The specified procedure could not be found".
+  - libabseil=20260526
+  - h5py
+  - geoh5py
+  - pytest
+  - debugpy
+  - ruff
+  - pip
+  - pip:
+      - pytest-qgis
