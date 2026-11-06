@@ -12,6 +12,7 @@ import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -46,9 +47,13 @@ FLOAT_NDV = 1.17549435e-38
 INTEGER_NDV = -2147483648
 
 # Data primitive types that map to attribute columns.
-ATTRIBUTE_PRIMITIVES = frozenset({"Float", "Integer", "Referenced", "Text", "Boolean"})
+ATTRIBUTE_PRIMITIVES = frozenset(
+    {"Float", "Integer", "Referenced", "Text", "Boolean", "DateTime"}
+)
 # Primitive types that become numeric raster bands / mesh datasets.
-NUMERIC_PRIMITIVES = frozenset({"Float", "Integer", "Boolean"})
+NUMERIC_PRIMITIVES = frozenset({"Float", "Integer", "Referenced", "Boolean"})
+# Fields of a data type's "Color map" compound, in column order.
+COLOR_MAP_FIELDS = ("Value", "Red", "Green", "Blue", "Alpha")
 # Grids with |dip| below this (degrees) count as horizontal (absorbs float noise).
 DIP_TOLERANCE = 1e-6
 # GeoImage corner checks, relative to the image's largest horizontal extent.
@@ -99,6 +104,27 @@ class DataInfo:
     name: str
     association: str
     primitive_type: str
+
+
+@dataclass(frozen=True)
+class DataChannel:
+    """A data channel's values and the display hints stored on its data type.
+
+    ``values`` by primitive type: Float as float64 with NaN for no-data; Integer
+    and Referenced as stored (INTEGER_NDV marks integer no-data); Boolean as
+    bool; Text as str objects; DateTime as datetime64[ms] with NaT for no-data.
+    """
+
+    uid: str
+    name: str
+    association: str
+    primitive_type: str
+    values: np.ndarray
+    units: str | None = None
+    # Key to name, for Referenced data only.
+    value_map: dict[int, str] | None = None
+    # (n, 5) rows of value, red, green, blue, alpha (colours 0-255).
+    color_map: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -302,14 +328,12 @@ def read_value_map(workspace: Workspace, data_uid: str) -> dict[int, str] | None
     return {int(k): str(n) for k, n in zip(keys, names, strict=True)}
 
 
-def read_attributes(
+def read_channels(
     workspace: Workspace, object_uid: str, association: str, length: int
-) -> dict[str, np.ndarray]:
-    """Read an object's data channels as attribute columns.
+) -> list[DataChannel]:
+    """Read an object's data channels that can become attribute columns.
 
-    Referenced (categorical) keys are replaced by their value-map names. Channels
-    with an unsupported primitive type or the wrong length are skipped. Duplicate
-    channel names get a numeric suffix.
+    Channels with an unsupported primitive type or the wrong length are skipped.
 
     Args:
         workspace: Project group from open_workspace().
@@ -318,24 +342,48 @@ def read_attributes(
         length: Expected number of values (vertices or cells).
 
     Returns:
-        Column name to 1-D array, in file order.
+        The channels, in file order.
 
     Raises:
         KeyError: If the object does not exist.
     """
-    columns: dict[str, np.ndarray] = {}
-    for info in list_data(workspace, object_uid):
-        if info.association != association:
-            continue
-        if info.primitive_type not in ATTRIBUTE_PRIMITIVES:
-            continue
-        values = read_data_values(workspace, info.uid)
-        if values.shape != (length,):
-            continue
-        if info.primitive_type == "Referenced":
-            values = _map_values(values, read_value_map(workspace, info.uid) or {})
-        columns[_unique_name(info.name, columns)] = values
-    return columns
+    infos = [
+        info
+        for info in list_data(workspace, object_uid)
+        if info.association == association
+        and info.primitive_type in ATTRIBUTE_PRIMITIVES
+    ]
+    channels = [read_channel(workspace, info) for info in infos]
+    return [c for c in channels if c.values.shape == (length,)]
+
+
+def read_channel(workspace: Workspace, info: DataInfo) -> DataChannel:
+    """Read one data channel with its units, value map and colour map.
+
+    Args:
+        workspace: Project group from open_workspace().
+        info: The channel, from list_data().
+
+    Returns:
+        The channel (see DataChannel for how values are typed).
+
+    Raises:
+        KeyError: If the data channel does not exist or stores no values.
+    """
+    data = _data(workspace, info.uid)
+    data_type = data.OpenGroup("Type") if "Type" in _groups(data) else None
+    units = str(_attrs(data_type).get("Units") or "") if data_type else ""
+    referenced = info.primitive_type == "Referenced"
+    return DataChannel(
+        uid=info.uid,
+        name=info.name,
+        association=info.association,
+        primitive_type=info.primitive_type,
+        values=_typed_values(read_data_values(workspace, info.uid), info),
+        units=units or None,
+        value_map=read_value_map(workspace, info.uid) if referenced else None,
+        color_map=_read_color_map(data_type) if data_type else None,
+    )
 
 
 def read_tree(workspace: Workspace) -> list[TreeNode]:
@@ -627,13 +675,31 @@ def _sorted_nodes(nodes: list[TreeNode]) -> tuple[TreeNode, ...]:
     return tuple(sorted(nodes, key=lambda n: (n.kind != GROUP, n.name.lower(), n.uid)))
 
 
-def _map_values(keys: np.ndarray, value_map: dict[int, str]) -> np.ndarray:
-    return np.array([value_map.get(int(k), str(k)) for k in keys], dtype=object)
+def _typed_values(values: np.ndarray, info: DataInfo) -> np.ndarray:
+    if info.primitive_type == "Boolean":
+        return values.astype(bool)
+    if info.primitive_type == "DateTime":
+        return np.array([_parse_datetime(v) for v in values], dtype="datetime64[ms]")
+    return values
 
 
-def _unique_name(name: str, taken: dict[str, object]) -> str:
-    candidates = (name if i == 1 else f"{name}_{i}" for i in range(1, len(taken) + 2))
-    return next(c for c in candidates if c not in taken)
+def _parse_datetime(text: object) -> np.datetime64:
+    """ISO 8601 text as naive UTC; NaT if empty or not a date."""
+    try:
+        moment = datetime.fromisoformat(str(text))
+    except ValueError:
+        return np.datetime64("NaT", "ms")
+    if moment.tzinfo is not None:
+        moment = moment.astimezone(UTC).replace(tzinfo=None)
+    return np.datetime64(moment, "ms")
+
+
+def _read_color_map(data_type: gdal.Group) -> np.ndarray | None:
+    if "Color map" not in (data_type.GetMDArrayNames() or []):
+        return None
+    color_map = data_type.OpenMDArray("Color map")
+    columns = [color_map.GetView(f'["{f}"]').ReadAsArray() for f in COLOR_MAP_FIELDS]
+    return np.column_stack(columns).astype(np.float64)
 
 
 def _object_info(uid: str, obj: gdal.Group) -> ObjectInfo:

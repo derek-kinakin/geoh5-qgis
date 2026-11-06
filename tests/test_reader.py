@@ -17,6 +17,11 @@ from conftest import (
     ROCK_VALUE_MAP,
     SURFACE_CELLS,
     SURFACE_VERTICES,
+    TYPED_COLOR_MAP,
+    TYPED_FLAGS,
+    TYPED_FLOATS,
+    TYPED_INTS,
+    TYPED_UNITS,
 )
 from geoh5_qgis.reader import (
     Grid2DFrame,
@@ -26,6 +31,7 @@ from geoh5_qgis.reader import (
     load_issue,
     open_workspace,
     read_cells,
+    read_channels,
     read_crs,
     read_data_values,
     read_grid2d_frame,
@@ -317,3 +323,41 @@ def test_real_drillhole_group_is_one_loadable_item() -> None:
         assert [(n.name, n.kind, n.children) for n in read_tree(ws)] == [
             ("Drillholes", "Drillholes", ())
         ]
+
+
+def typed_channels(path: Path) -> dict:
+    with open_workspace(path) as ws:
+        uid = object_by_name(ws, "typed").uid
+        return {c.name: c for c in read_channels(ws, uid, "Vertex", 4)}
+
+
+def test_read_channels_types_each_primitive(channels_file: Path) -> None:
+    channels = typed_channels(channels_file)
+    np.testing.assert_array_equal(channels["au"].values, TYPED_FLOATS)
+    assert channels["count"].values.tolist() == TYPED_INTS.tolist()
+    assert channels["rock"].values.tolist() == POINT_ROCK_KEYS.tolist()
+    assert channels["flag"].values.dtype == bool
+    assert channels["flag"].values.tolist() == TYPED_FLAGS.tolist()
+    assert channels["note"].values.tolist() == POINT_TEXT
+    expected_dates = np.array(
+        ["2024-01-02T03:04:05", "2024-02-03", "NaT", "2024-03-04T10:00:00"],
+        dtype="datetime64[ms]",
+    )
+    np.testing.assert_array_equal(channels["when"].values, expected_dates)
+
+
+def test_read_channels_type_metadata(channels_file: Path) -> None:
+    channels = typed_channels(channels_file)
+    assert channels["au"].units == TYPED_UNITS
+    assert channels["count"].units is None
+    np.testing.assert_array_equal(channels["au"].color_map, TYPED_COLOR_MAP)
+    assert channels["count"].color_map is None
+    assert channels["rock"].value_map == ROCK_VALUE_MAP
+    # Booleans carry a False/True value map in the file; only Referenced uses it.
+    assert channels["flag"].value_map is None
+
+
+def test_read_channels_skips_other_associations(channels_file: Path) -> None:
+    with open_workspace(channels_file) as ws:
+        uid = object_by_name(ws, "typed").uid
+        assert read_channels(ws, uid, "Cell", 4) == []

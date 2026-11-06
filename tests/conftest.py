@@ -121,6 +121,64 @@ def geoh5_file(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return path
 
 
+# One value per primitive type for each of the four POINT_VERTICES.
+TYPED_FLOATS = np.array([0.25, np.nan, 2.0, 8.0])
+TYPED_INTS = np.array([5, -2147483648, 7, 0], dtype=np.int32)  # 2nd is no-data
+TYPED_FLAGS = np.array([True, False, True, False])
+TYPED_DATES = ["2024-01-02T03:04:05", "2024-02-03", "", "2024-03-04T12:00:00+02:00"]
+TYPED_UNITS = "g/t"
+# Value, red, green, blue, alpha.
+TYPED_COLOR_MAP = np.array(
+    [[0.0, 0, 0, 255, 255], [4.0, 0, 255, 0, 255], [8.0, 255, 0, 0, 255]]
+)
+
+
+@pytest.fixture(scope="session")
+def channels_file(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Points 'typed' with one channel of each primitive type; 'au' has units and
+    a colour map. Grid2D 'zones' has a referenced cell channel."""
+    path = tmp_path_factory.mktemp("geoh5") / "channels.geoh5"
+    with Workspace.create(path) as ws:
+        points = Points.create(ws, name="typed", vertices=POINT_VERTICES)
+        channels = points.add_data(
+            {
+                "au": {"values": TYPED_FLOATS},
+                "count": {"values": TYPED_INTS},
+                "rock": {
+                    "type": "referenced",
+                    "values": POINT_ROCK_KEYS,
+                    "value_map": ROCK_VALUE_MAP,
+                },
+                "flag": {"type": "boolean", "values": TYPED_FLAGS},
+                "when": {"type": "datetime", "values": np.array(TYPED_DATES)},
+                "note": {"type": "text", "values": np.array(POINT_TEXT)},
+            }
+        )
+        au = channels[0]
+        au.entity_type.color_map = np.rec.fromarrays(
+            [
+                TYPED_COLOR_MAP[:, 0],
+                *(TYPED_COLOR_MAP[:, i].astype("u1") for i in range(1, 5)),
+            ],
+            names="Value,Red,Green,Blue,Alpha",
+        )
+        au_uid = str(au.uid)
+        grid = Grid2D.create(ws, name="zones", **GRID_KWARGS)
+        grid.add_data(
+            {
+                "zone": {
+                    "type": "referenced",
+                    "values": np.array([1, 2] * 6, dtype=np.uint32),
+                    "value_map": {1: "A", 2: "B"},
+                    "association": "CELL",
+                }
+            }
+        )
+    with h5py.File(path, "r+") as f:  # geoh5py 0.13 does not write units
+        f["GEOSCIENCE"]["Data"][f"{{{au_uid}}}"]["Type"].attrs["Units"] = TYPED_UNITS
+    return path
+
+
 @pytest.fixture(scope="session", autouse=True)
 def remove_session_temp_files():
     """Delete every plugin temp folder created during the test run.

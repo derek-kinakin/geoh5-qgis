@@ -18,19 +18,26 @@ from qgis.core import (
     QgsVectorLayer,
     QgsWkbTypes,
 )
+from qgis.PyQt.QtCore import QMetaType, Qt
 from qgis.PyQt.QtXml import QDomDocument
 
 from conftest import (
     CURVE_CELLS,
     CURVE_VERTICES,
     POINT_INTS,
+    POINT_ROCK_KEYS,
     POINT_TEXT,
     POINT_VERTICES,
     SHADED_VERTEX_VALUES,
     SURFACE_CELLS,
     SURFACE_VERTICES,
+    TYPED_FLAGS,
+    TYPED_UNITS,
 )
 from geoh5_qgis.layers import (
+    _with_aliases,
+    channel_columns,
+    curve_layer,
     curve_parts,
     load_object_layer,
     load_object_layers,
@@ -38,7 +45,7 @@ from geoh5_qgis.layers import (
     mesh_display_name,
     vertex_parts,
 )
-from geoh5_qgis.reader import Grid2DFrame, list_objects, open_workspace
+from geoh5_qgis.reader import DataChannel, Grid2DFrame, list_objects, open_workspace
 from geoh5_qgis.tempfiles import is_temp_file
 
 ASSETS = Path(r"C:\Users\dkinakin\Dev\geoh5vista\assets")
@@ -77,8 +84,65 @@ def test_points_layer(geoh5_file: Path) -> None:
     rows = attribute_rows(layer)
     assert [r["grade"] for r in rows] == [1.5, NULL, 3.5, 4.5]
     assert [r["count"] for r in rows] == POINT_INTS.tolist()
-    assert [r["rock"] for r in rows] == ["granite", "basalt", "granite", "Unknown"]
+    assert [r["rock"] for r in rows] == POINT_ROCK_KEYS.tolist()
+    labels = ["granite", "basalt", "granite", "Unknown"]
+    assert [r["rock_label"] for r in rows] == labels
     assert [r["note"] for r in rows] == POINT_TEXT
+
+
+def test_points_fields_match_geoh5_primitive_types(channels_file: Path) -> None:
+    layer = load_object_layer(channels_file, uid_of(channels_file, "typed"))
+    fields = layer.fields()
+    types = {f.name(): f.type() for f in fields}
+    assert types == {
+        "au": QMetaType.Type.Double,
+        "count": QMetaType.Type.LongLong,
+        "rock": QMetaType.Type.LongLong,
+        "rock_label": QMetaType.Type.QString,
+        "flag": QMetaType.Type.Bool,
+        "when": QMetaType.Type.QDateTime,
+        "note": QMetaType.Type.QString,
+    }
+    assert fields.field("au").alias() == f"au ({TYPED_UNITS})"
+    assert fields.field("count").alias() == ""
+
+
+def test_points_values_round_trip_with_no_data_as_null(channels_file: Path) -> None:
+    layer = load_object_layer(channels_file, uid_of(channels_file, "typed"))
+    rows = attribute_rows(layer)
+    assert [r["au"] for r in rows] == [0.25, NULL, 2.0, 8.0]
+    assert [r["count"] for r in rows] == [5, NULL, 7, 0]
+    assert [r["flag"] for r in rows] == TYPED_FLAGS.tolist()
+    assert [r["rock"] for r in rows] == POINT_ROCK_KEYS.tolist()
+    assert [r["note"] for r in rows] == POINT_TEXT
+    dates = [r["when"] for r in rows]
+    assert dates[2] == NULL
+    assert [d.toString(Qt.DateFormat.ISODate) for d in dates if d != NULL] == [
+        "2024-01-02T03:04:05",
+        "2024-02-03T00:00:00",
+        "2024-03-04T10:00:00",  # +02:00 converted to UTC
+    ]
+
+
+def test_aliases_follow_renamed_channel_columns() -> None:
+    # A curve channel named like the fixed "part" column is renamed "part_2";
+    # its alias must land on that field, not on the fixed one.
+    channel = DataChannel("{u}", "part", "Cell", "Float", np.ones(3), units="m")
+    columns, aliases = channel_columns([channel])
+    layer = curve_layer("c", CURVE_VERTICES, CURVE_CELLS, columns, None)
+    _with_aliases(layer, aliases)
+    assert layer.fields().names() == ["part", "part_2"]
+    assert layer.fields().field("part").alias() == ""
+    assert layer.fields().field("part_2").alias() == "part (m)"
+
+
+def test_referenced_grid2d_channel_becomes_a_band(channels_file: Path) -> None:
+    layer = load_object_layer(channels_file, uid_of(channels_file, "zones"))
+    assert isinstance(layer, QgsRasterLayer)
+    with gdal.ExceptionMgr(useExceptions=True):
+        dataset = gdal.Open(layer.source())
+        assert dataset.GetRasterBand(1).GetDescription() == "zone"
+        assert set(np.unique(dataset.ReadAsArray())) == {1.0, 2.0}
 
 
 def test_layer_records_its_geoh5_source(geoh5_file: Path) -> None:

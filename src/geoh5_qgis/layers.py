@@ -24,7 +24,7 @@ from qgis.core import (
     QgsReadWriteContext,
     QgsVectorLayer,
 )
-from qgis.PyQt.QtCore import QMetaType
+from qgis.PyQt.QtCore import QDateTime, QMetaType
 from qgis.PyQt.QtXml import QDomDocument
 
 from geoh5_qgis.drillholes import (
@@ -42,13 +42,14 @@ from geoh5_qgis.reader import (
     INTEGER_NDV,
     POINTS,
     SURFACE,
+    DataChannel,
     Grid2DFrame,
     Workspace,
     find_object,
     is_horizontal,
     open_workspace,
-    read_attributes,
     read_cells,
+    read_channels,
     read_crs,
     read_geoimage,
     read_grid2d_frame,
@@ -68,6 +69,8 @@ POLYGONS_PART = "polygons"  # a surface loaded as triangle polygons
 VERTEX_ROLE = "vertices"
 VERTEX_LAYER_SUFFIX = " vertices"
 MESH_PROVIDER = "mdal"
+# Suffix of the text column holding a referenced channel's names.
+LABEL_SUFFIX = "_label"
 MESH_3D_RENDERER = "mesh"
 NBSP = " "
 # ISO WKB geometry type codes (Z variants).
@@ -157,33 +160,46 @@ def _build_layers(
 ) -> list[QgsMapLayer]:
     if kind == POINTS:
         vertices = read_vertices(workspace, uid)
-        attributes = read_attributes(workspace, uid, "Vertex", len(vertices))
-        return [points_layer(name, vertices, attributes, crs)]
+        columns, aliases = channel_columns(
+            read_channels(workspace, uid, "Vertex", len(vertices))
+        )
+        return [_with_aliases(points_layer(name, vertices, columns, crs), aliases)]
     if kind == CURVE:
         vertices = read_vertices(workspace, uid)
         cells = read_cells(workspace, uid)
-        cell_data = read_attributes(workspace, uid, "Cell", len(cells))
-        vertex_data = read_attributes(workspace, uid, "Vertex", len(vertices))
-        layers = [curve_layer(name, vertices, cells, cell_data, crs)]
+        cell_data, cell_aliases = channel_columns(
+            read_channels(workspace, uid, "Cell", len(cells))
+        )
+        vertex_data, vertex_aliases = channel_columns(
+            read_channels(workspace, uid, "Vertex", len(vertices))
+        )
+        curve = curve_layer(name, vertices, cells, cell_data, crs)
+        layers = [_with_aliases(curve, cell_aliases)]
         if vertex_data:
-            layers.append(curve_vertex_layer(name, vertices, cells, vertex_data, crs))
+            vertex_layer = curve_vertex_layer(name, vertices, cells, vertex_data, crs)
+            layers.append(_with_aliases(vertex_layer, vertex_aliases))
         return layers
     if kind == SURFACE:
         vertices = read_vertices(workspace, uid)
         cells = read_cells(workspace, uid)
-        cell_data = read_attributes(workspace, uid, "Cell", len(cells))
+        cell_data, cell_aliases = channel_columns(
+            read_channels(workspace, uid, "Cell", len(cells))
+        )
         if as_polygons:
-            return [surface_polygons_layer(name, vertices, cells, cell_data, crs)]
-        vertex_data = _numeric(read_attributes(workspace, uid, "Vertex", len(vertices)))
+            polygons = surface_polygons_layer(name, vertices, cells, cell_data, crs)
+            return [_with_aliases(polygons, cell_aliases)]
+        vertex_data, _ = channel_columns(
+            read_channels(workspace, uid, "Vertex", len(vertices))
+        )
         mesh = surface_mesh_layer(
-            name, vertices, cells, vertex_data, _numeric(cell_data), crs
+            name, vertices, cells, _numeric(vertex_data), _numeric(cell_data), crs
         )
         return [mesh]
     if kind == GRID2D:
         frame = read_grid2d_frame(workspace, uid)
         n_cells = frame.u_count * frame.v_count
-        bands = _numeric(read_attributes(workspace, uid, "Cell", n_cells))
-        return [grid2d_layer(name, uid, frame, bands, crs)]
+        bands, _ = channel_columns(read_channels(workspace, uid, "Cell", n_cells))
+        return [grid2d_layer(name, uid, frame, _numeric(bands), crs)]
     if kind == DRILLHOLES:
         return drillhole_layers(name, read_drillholes(workspace, uid), crs)
     if kind == GEOIMAGE:
@@ -194,6 +210,54 @@ def _build_layers(
         suffix = Path(image.file_name or "").suffix or ".img"
         return [geoimage_layer(name, uid, image.corners, image_bytes, suffix, crs)]
     raise ValueError(f"Object {name!r} has unsupported kind {kind!r}")
+
+
+def channel_columns(
+    channels: list[DataChannel],
+) -> tuple[dict[str, np.ndarray], list[str | None]]:
+    """Turn data channels into attribute columns, with an alias per column.
+
+    Each channel gives a column of its stored values under its name (made unique
+    with ``_2``, ``_3``...). A referenced channel keeps its integer keys and also
+    gives a ``<name>_label`` text column of the value-map names. A channel with
+    units is aliased ``"<name> (<units>)"``.
+
+    Args:
+        channels: Channels from reader.read_channels().
+
+    Returns:
+        Column name to values, and the alias of each column in the same order
+        (None for no alias).
+    """
+    taken: set[str] = set()
+    columns: dict[str, np.ndarray] = {}
+    aliases: list[str | None] = []
+    for channel in channels:
+        columns[_unique(channel.name, taken)] = channel.values
+        aliases.append(f"{channel.name} ({channel.units})" if channel.units else None)
+        if channel.value_map is not None:
+            label = _unique(f"{channel.name}{LABEL_SUFFIX}", taken)
+            columns[label] = _labels(channel.values, channel.value_map)
+            aliases.append(None)
+    return columns, aliases
+
+
+def _labels(keys: np.ndarray, value_map: dict[int, str]) -> np.ndarray:
+    """Value-map names of referenced keys; unmapped keys show as their number."""
+    return np.array([value_map.get(int(k), str(k)) for k in keys], dtype=object)
+
+
+def _with_aliases(layer: QgsVectorLayer, aliases: list[str | None]) -> QgsVectorLayer:
+    """Alias the layer's last fields, which builders fill from channel columns.
+
+    Counting from the end still finds the right fields when a builder renamed a
+    channel column to avoid one of its own fixed columns.
+    """
+    first = layer.fields().count() - len(aliases)
+    for offset, alias in enumerate(aliases):
+        if alias:
+            layer.setFieldAlias(first + offset, alias)
+    return layer
 
 
 def points_layer(
@@ -776,12 +840,18 @@ def _from_wkb(wkb: bytes) -> QgsGeometry:
     return geometry
 
 
+# numpy dtype kind to QGIS field type; anything else becomes a string field.
+FIELD_TYPES = {
+    "f": QMetaType.Type.Double,
+    "i": QMetaType.Type.LongLong,
+    "u": QMetaType.Type.LongLong,
+    "b": QMetaType.Type.Bool,
+    "M": QMetaType.Type.QDateTime,
+}
+
+
 def _field_type(values: np.ndarray) -> QMetaType.Type:
-    if values.dtype.kind == "f":
-        return QMetaType.Type.Double
-    if values.dtype.kind in "iub":
-        return QMetaType.Type.LongLong
-    return QMetaType.Type.QString
+    return FIELD_TYPES.get(values.dtype.kind, QMetaType.Type.QString)
 
 
 def _python_values(values: np.ndarray) -> list:
@@ -790,6 +860,10 @@ def _python_values(values: np.ndarray) -> list:
         return [None if np.isnan(v) else v for v in values.tolist()]
     if values.dtype.kind in "iu":
         return [None if v == INTEGER_NDV else v for v in values.tolist()]
+    if values.dtype.kind == "M":
+        # The memory provider rejects Python datetimes; NaT comes back as None.
+        moments = values.astype("datetime64[ms]").tolist()
+        return [None if m is None else QDateTime(m) for m in moments]
     return values.tolist()
 
 
@@ -829,8 +903,8 @@ def _as_float(values: np.ndarray) -> np.ndarray:
 
 
 def _numeric(columns: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-    """Drop text and value-mapped (string) columns."""
-    return {k: v for k, v in columns.items() if v.dtype != object}
+    """Keep number and boolean columns; drop text, labels and dates."""
+    return {k: v for k, v in columns.items() if v.dtype.kind in "fiub"}
 
 
 def _unique(name: str, taken: set[str]) -> str:
