@@ -1,7 +1,7 @@
 """Build QGIS layers from geoh5 objects.
 
 Vector objects become memory-provider layers. Surfaces with vertex data become
-``mesh_memory`` mesh layers instead. Grid2D and GeoImage objects become
+PLY mesh files (``mdal`` provider) instead. Grid2D and GeoImage objects become
 GeoTIFF/VRT files in the session temp folder (see tempfiles.py), opened with the
 ``gdal`` provider. Each layer records its source file, object UID and part as
 custom properties, so the geoh5 file stays the source of truth.
@@ -66,9 +66,8 @@ PART_PROPERTY = "geoh5/part"
 MAIN_PART = "main"
 VERTEX_ROLE = "vertices"
 VERTEX_LAYER_SUFFIX = " vertices"
-MESH_MEMORY_PROVIDER = "mesh_memory"
+MESH_PROVIDER = "mdal"
 MESH_3D_RENDERER = "mesh"
-ELEVATION_DATASET = "Z"
 NBSP = " "
 # ISO WKB geometry type codes (Z variants).
 WKB_POINT_Z = 1001
@@ -311,11 +310,13 @@ def surface_mesh_layer(
     face_data: dict[str, np.ndarray],
     crs: str | None,
 ) -> QgsMeshLayer:
-    """Build an in-memory mesh layer for a surface with vertex data.
+    """Build a mesh layer for a surface with vertex data.
 
-    The ``mesh_memory`` provider stores 2D vertices only, so elevation is added
-    as the first vertex dataset (ELEVATION_DATASET), which is also the active
-    colouring and can drive elevation in 3D views.
+    The surface is written as a binary PLY file in the session temp folder and
+    opened with the ``mdal`` provider, so vertices keep their real Z (3D views,
+    elevation profiles and exports use it). MDAL exposes Z as the first dataset
+    group, "Bed Elevation", which is the default colouring; the data channels
+    follow as vertex and face datasets.
 
     Args:
         name: Layer name.
@@ -329,23 +330,14 @@ def surface_mesh_layer(
         The mesh layer.
 
     Raises:
-        RuntimeError: If QGIS rejects the mesh or a dataset.
+        RuntimeError: If QGIS cannot open the written mesh.
     """
-    layer = QgsMeshLayer(_mesh_uri(vertices, cells), name, MESH_MEMORY_PROVIDER)
+    path = new_path(name, ".ply")
+    _write_ply(path, vertices, cells, vertex_data, face_data)
+    layer = QgsMeshLayer(str(path), name, MESH_PROVIDER)
     if not layer.isValid():
-        raise RuntimeError(f"QGIS could not build a mesh for surface {name!r}")
-    layer.setCrs(
-        QgsCoordinateReferenceSystem(crs) if crs else QgsCoordinateReferenceSystem()
-    )
-    datasets = [("vertex", ELEVATION_DATASET, vertices[:, 2])]
-    datasets += [("vertex", k, v) for k, v in vertex_data.items()]
-    datasets += [("face", k, v) for k, v in face_data.items()]
-    taken: set[str] = set()
-    for location, dataset_name, values in datasets:
-        unique = _unique(dataset_name, taken)
-        uri = _mesh_dataset_uri(location, unique, values)
-        if not layer.dataProvider().addDataset(uri):
-            raise RuntimeError(f"QGIS rejected dataset {unique!r} on {name!r}")
+        raise RuntimeError(f"QGIS could not open the mesh written for {name!r}")
+    layer.setCrs(QgsCoordinateReferenceSystem(crs or ""))  # "" -> unset CRS
     settings = layer.rendererSettings()
     settings.setActiveScalarDatasetGroup(0)  # elevation
     # Dense triangle wireframes swamp the colours; users can turn edges back on.
@@ -394,9 +386,9 @@ def _set_3d_height_from_dataset(layer: QgsMeshLayer, group_index: int) -> None:
 
 
 def mesh_dataset_name(name: str) -> str:
-    """Encode a name for a mesh_memory dataset URI.
+    """Encode a name for a mesh dataset (a PLY property name).
 
-    The provider splits its type line on ASCII spaces, so spaces become
+    PLY headers separate tokens with ASCII whitespace, so spaces become
     non-breaking spaces (which display the same). Newlines are flattened.
 
     Args:
@@ -842,24 +834,49 @@ def _unique(name: str, taken: set[str]) -> str:
     return unique
 
 
-def _mesh_uri(vertices: np.ndarray, cells: np.ndarray) -> str:
-    """mesh_memory URI: ``x,y`` lines, ``---``, then ``i,j,k`` face lines."""
-    return f"{_csv_lines(vertices[:, :2])}\n---\n{_csv_lines(cells)}"
+def _write_ply(
+    path: Path,
+    vertices: np.ndarray,
+    cells: np.ndarray,
+    vertex_data: dict[str, np.ndarray],
+    face_data: dict[str, np.ndarray],
+) -> None:
+    """Write a triangle mesh with vertex/face properties as binary PLY.
 
-
-def _mesh_dataset_uri(location: str, name: str, values: np.ndarray) -> str:
-    """mesh_memory dataset URI: type line, metadata, then time and values.
-
-    Sections are separated by ``---``; an empty metadata section would be
-    dropped by the provider's parser, so one metadata line is always written.
+    MDAL reads vertex properties other than x, y, z as vertex datasets and face
+    properties as face datasets. Property names are whitespace-separated in
+    the header, so they go through mesh_dataset_name(); channels named like the
+    coordinates get a suffix so they cannot replace them.
     """
-    header = f"{location} scalar {mesh_dataset_name(name)}"
-    return f"{header}\n---\nsource: geoh5\n---\n0\n{_csv_lines(_as_float(values))}"
-
-
-def _csv_lines(array: np.ndarray) -> str:
-    """Comma-separated rows; floats use NumPy's shortest round-trip repr."""
-    text = np.asarray(array).astype(str)
-    if text.ndim == 1:
-        return "\n".join(text)
-    return "\n".join(",".join(row) for row in text)
+    taken = {"x", "y", "z"}
+    vertex_columns = {"x": vertices[:, 0], "y": vertices[:, 1], "z": vertices[:, 2]}
+    vertex_columns |= {_unique(k, taken): _as_float(v) for k, v in vertex_data.items()}
+    face_names = set()
+    face_columns = {_unique(k, face_names): _as_float(v) for k, v in face_data.items()}
+    header = [
+        "ply",
+        "format binary_little_endian 1.0",
+        f"element vertex {len(vertices)}",
+        *(f"property double {mesh_dataset_name(n)}" for n in vertex_columns),
+        f"element face {len(cells)}",
+        "property list uchar int vertex_indices",
+        *(f"property double {mesh_dataset_name(n)}" for n in face_columns),
+        "end_header",
+    ]
+    vertex_records = np.empty(
+        len(vertices), [(f"v{i}", "<f8") for i in range(len(vertex_columns))]
+    )
+    for i, values in enumerate(vertex_columns.values()):
+        vertex_records[f"v{i}"] = values
+    face_records = np.empty(
+        len(cells),
+        [("count", "u1"), ("indices", "<i4", (3,))]
+        + [(f"f{i}", "<f8") for i in range(len(face_columns))],
+    )
+    face_records["count"], face_records["indices"] = 3, cells
+    for i, values in enumerate(face_columns.values()):
+        face_records[f"f{i}"] = values
+    with open(path, "wb") as file:
+        file.write(("\n".join(header) + "\n").encode("utf-8"))
+        file.write(vertex_records.tobytes())
+        file.write(face_records.tobytes())

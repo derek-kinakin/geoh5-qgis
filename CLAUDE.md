@@ -44,11 +44,12 @@ Background research and decisions: `docs/research/geoh5-qgis-plugin-research.md`
 
 - Memory vector layers default to EPSG:4326 when the URI has no `crs=`; set an empty
   `QgsCoordinateReferenceSystem()` when the geoh5 object has no CRS.
-- `mesh_memory` provider (surfaces with vertex data): vertices are **x,y only** (Z is
-  rejected), so elevation is added as a "Z" vertex dataset. Dataset type line is
-  `<vertex|face> scalar <name>` split on ASCII spaces, so names use non-breaking spaces
-  (`mesh_dataset_name` / `mesh_display_name`). The metadata section must be non-empty.
-  Renderer settings getters return copies: set them back after editing.
+- Surfaces with vertex data are binary PLY files (written with numpy) opened with the
+  `mdal` provider: real vertex Z, MDAL adds a "Bed Elevation" dataset, other PLY
+  properties become vertex/face datasets. Do not use `mesh_memory` (x,y only, no Z,
+  datasets cannot be saved, whole mesh stored in the project file). PLY property names
+  use non-breaking spaces for spaces (`mesh_dataset_name`). Renderer settings getters
+  return copies: set them back after editing.
 - TIN geometry (`TINZ`) works in memory in 4.2.3 but QGIS cannot save it to GPKG,
   FlatGeobuf, GeoJSON, Shapefile or DXF ("Feature geometry not imported"), so surfaces
   without vertex data use a single MultiPolygonZ feature instead.

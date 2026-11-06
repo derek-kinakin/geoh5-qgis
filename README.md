@@ -13,7 +13,8 @@ objects to a QGIS project as in-memory layers.
   **Add All Objects in Group to Project**.
 - Supported objects: Points, Curve, Surface, horizontal Grid2D, GeoImage and drillhole
   groups (collars, traces and interval tables). Surfaces with vertex
-  data load as mesh layers coloured by elevation; the other surfaces load as vector
+  data load as mesh layers (with real elevation) coloured by elevation; the other
+  surfaces load as vector
   layers.
 
 To try it, point `QGIS_PLUGINPATH` at this repo's `src` folder, start QGIS 4.x and enable

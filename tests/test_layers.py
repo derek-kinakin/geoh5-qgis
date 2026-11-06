@@ -8,6 +8,7 @@ from geoh5py.workspace import Workspace as Geoh5pyWorkspace
 from osgeo import gdal
 from qgis.core import (
     NULL,
+    QgsMesh,
     QgsMeshDatasetGroupMetadata,
     QgsMeshDatasetIndex,
     QgsMeshLayer,
@@ -38,6 +39,7 @@ from geoh5_qgis.layers import (
     vertex_parts,
 )
 from geoh5_qgis.reader import Grid2DFrame, list_objects, open_workspace
+from geoh5_qgis.tempfiles import is_temp_file
 
 ASSETS = Path(r"C:\Users\dkinakin\Dev\geoh5vista\assets")
 
@@ -219,12 +221,22 @@ def test_surface_with_vertex_data_is_a_mesh(geoh5_file: Path) -> None:
     assert not layer.crs().isValid()
     assert layer.customProperty("geoh5/uid") == uid_of(geoh5_file, "shaded")
 
+    # A real mesh file in the session temp folder, with true vertex elevations.
+    assert layer.providerType() == "mdal"
+    assert is_temp_file(layer.source()) and layer.source().endswith(".ply")
+    native = QgsMesh()
+    layer.dataProvider().populateMesh(native)
+    assert [native.vertex(i).z() for i in range(native.vertexCount())] == (
+        SURFACE_VERTICES[:, 2].tolist()
+    )
+
     on_vertices = QgsMeshDatasetGroupMetadata.DataType.DataOnVertices
     on_faces = QgsMeshDatasetGroupMetadata.DataType.DataOnFaces
     groups = mesh_groups(layer)
-    # Text data cannot be a mesh dataset and is skipped.
-    assert list(groups) == ["Z", "Residual mag", "zone"]
-    assert groups["Z"] == (on_vertices, SURFACE_VERTICES[:, 2].tolist())
+    # Text data cannot be a mesh dataset and is skipped. MDAL exposes vertex Z
+    # as "Bed Elevation".
+    assert list(groups) == ["Bed Elevation", "Residual mag", "zone"]
+    assert groups["Bed Elevation"] == (on_vertices, SURFACE_VERTICES[:, 2].tolist())
     kind, values = groups["Residual mag"]
     assert kind == on_vertices
     np.testing.assert_array_equal(values, SHADED_VERTEX_VALUES)  # NaN kept
@@ -307,3 +319,20 @@ def test_mesh_3d_view_takes_height_from_elevation_dataset(geoh5_file: Path) -> N
     assert 'vertical-scale="1"' in xml
     assert 'smoothed-triangle="1"' in xml
     assert f'layer="{layer.id()}"' in xml
+
+
+def test_mesh_channels_named_like_coordinates_do_not_clash() -> None:
+    from geoh5_qgis.layers import surface_mesh_layer
+
+    layer = surface_mesh_layer(
+        "m",
+        SURFACE_VERTICES,
+        SURFACE_CELLS.astype(np.int64),
+        {"z": np.array([1.0, 2.0, 3.0, 4.0])},
+        {},
+        None,
+    )
+    native = QgsMesh()
+    layer.dataProvider().populateMesh(native)
+    assert native.vertex(0).z() == SURFACE_VERTICES[0, 2]  # coordinates intact
+    assert "z_2" in mesh_groups(layer)

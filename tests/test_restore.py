@@ -1,5 +1,6 @@
 """Tests for rebuilding geoh5 layers when a saved project is reopened."""
 
+import re
 import shutil
 import time
 from pathlib import Path
@@ -149,7 +150,10 @@ def test_generated_rasters_reopen_valid_without_a_bad_layer_prompt(
     with zipfile.ZipFile(tmp_path / "saved.qgz") as archive:
         xml = archive.read(next(n for n in archive.namelist() if n.endswith(".qgs")))
     assert b"geoh5:" in xml  # token saved instead of the temp file path
-    assert tempfiles.PREFIX.encode() not in xml
+    # No layer data source points at a temp file (labels such as a mesh dataset
+    # group's description may still mention one; they do not affect loading).
+    sources = re.findall(rb"<datasource>(.*?)</datasource>", xml)
+    assert sources and not any(tempfiles.PREFIX.encode() in s for s in sources)
     # Valid straight after reading, before any background rebuild.
     grid = layer(project, "grid")
     assert grid.isValid()
