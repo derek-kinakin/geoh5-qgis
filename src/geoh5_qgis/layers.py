@@ -32,6 +32,7 @@ from geoh5_qgis.reader import (
     SURFACE,
     Grid2DFrame,
     Workspace,
+    is_horizontal,
     list_objects,
     open_workspace,
     read_attributes,
@@ -370,7 +371,7 @@ def grid2d_layer(
     Raises:
         ValueError: If the grid is dipping/vertical or has no numeric data.
     """
-    if frame.vertical or frame.dip != 0.0:
+    if not is_horizontal(frame):
         raise ValueError(
             f"Grid2D {name!r} has dip {frame.dip} (vertical={frame.vertical}); "
             "only horizontal grids can be shown as map rasters"

@@ -103,3 +103,34 @@ def geoh5_file(tmp_path_factory: pytest.TempPathFactory) -> Path:
             }
         )
     return path
+
+
+@pytest.fixture(scope="session")
+def grid_issues_file(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Grid2D objects that cannot (or can only just) be map rasters."""
+    path = tmp_path_factory.mktemp("geoh5") / "grid_issues.geoh5"
+    cell_data = {
+        "v": {"values": np.arange(12, dtype=np.float64), "association": "CELL"}
+    }
+    with Workspace.create(path) as ws:
+        for name, extra in [
+            ("dipping", {"dip": -35.0}),
+            ("vertical", {"vertical": True}),
+            ("nearly_flat", {"dip": 1e-9}),
+            ("empty", {}),
+            ("text_only", {}),
+        ]:
+            grid = Grid2D.create(ws, name=name, **GRID_KWARGS, **extra)
+            if name in ("dipping", "vertical", "nearly_flat"):
+                grid.add_data(cell_data)
+            if name == "text_only":
+                grid.add_data(
+                    {
+                        "note": {
+                            "type": "text",
+                            "values": np.array(["x"] * 12),
+                            "association": "CELL",
+                        }
+                    }
+                )
+    return path

@@ -32,9 +32,9 @@ from geoh5_qgis.reader import (
     GRID2D,
     POINTS,
     SURFACE,
-    UNSUPPORTED,
     ObjectInfo,
     list_objects,
+    load_issue,
     open_workspace,
 )
 
@@ -142,17 +142,32 @@ class Geoh5FileItem(QgsDataCollectionItem):
     def createChildren(self) -> list[QgsDataItem]:
         try:
             with open_workspace(self.file_path) as workspace:
-                objects = list_objects(workspace)
+                objects = [
+                    (o, _safe_issue(workspace, o)) for o in list_objects(workspace)
+                ]
         except (RuntimeError, ValueError, FileNotFoundError) as exc:
             return [QgsErrorItem(self, f"Cannot read file: {exc}", f"{self.path()}/!")]
-        ordered = sorted(objects, key=lambda o: (o.name.lower(), o.uid))
-        return [Geoh5ObjectItem(self, info, self.file_path) for info in ordered]
+        ordered = sorted(objects, key=lambda pair: (pair[0].name.lower(), pair[0].uid))
+        return [
+            Geoh5ObjectItem(self, info, self.file_path, issue)
+            for info, issue in ordered
+        ]
 
 
 class Geoh5ObjectItem(QgsDataItem):
-    """One object in a .geoh5 file. Adding it loads a layer."""
+    """One object in a .geoh5 file. Adding it loads a layer.
 
-    def __init__(self, parent: QgsDataItem, info: ObjectInfo, file_path: str) -> None:
+    ``issue`` (from reader.load_issue) explains why the object cannot be
+    loaded; such items show the reason and offer no add/drag actions.
+    """
+
+    def __init__(
+        self,
+        parent: QgsDataItem,
+        info: ObjectInfo,
+        file_path: str,
+        issue: str | None = None,
+    ) -> None:
         super().__init__(
             Qgis.BrowserItemType.Custom,
             parent,
@@ -163,14 +178,15 @@ class Geoh5ObjectItem(QgsDataItem):
         self.file_path = file_path
         self.uid = info.uid
         self.kind = info.kind
+        self.issue = issue
         self.setState(Qgis.BrowserItemState.Populated)  # no children
         icon = _KIND_ICONS.get(info.kind, QgsLayerItem.iconDefault)
         self.setIcon(icon())
-        note = " (not supported yet)" if info.kind == UNSUPPORTED else ""
-        self.setToolTip(f"{info.kind}{note}\n{info.uid}")
+        reason = f"\nCannot be added: {issue}" if issue else ""
+        self.setToolTip(f"{info.kind}{reason}\n{info.uid}")
 
     def hasDragEnabled(self) -> bool:
-        return self.kind != UNSUPPORTED
+        return self.issue is None
 
     def mimeUris(self) -> list[QgsMimeDataUtils.Uri]:
         uri = QgsMimeDataUtils.Uri()
@@ -190,12 +206,19 @@ class Geoh5DataItemGuiProvider(QgsDataItemGuiProvider):
     def handleDoubleClick(self, item, context) -> bool:
         if not isinstance(item, Geoh5ObjectItem):
             return False
+        if item.issue:
+            _report([f"{item.name()}: {item.issue}"], context.messageBar())
+            return True
         _, errors = add_objects(item.file_path, [item.uid], QgsProject.instance())
         _report(errors, context.messageBar())
         return True
 
     def populateContextMenu(self, item, menu, selectedItems, context) -> None:
-        objects = [i for i in selectedItems if isinstance(i, Geoh5ObjectItem)]
+        objects = [
+            i
+            for i in selectedItems
+            if isinstance(i, Geoh5ObjectItem) and i.issue is None
+        ]
         if isinstance(item, Geoh5ObjectItem) and objects:
             label = (
                 "Add Selected Objects to Project"
@@ -234,10 +257,32 @@ def _add_items(items: list[Geoh5ObjectItem], context) -> None:
     _report(errors, context.messageBar())
 
 
+def loadable_object_uids(path: str | Path) -> list[str]:
+    """UIDs of the objects in a file that can be loaded as layers.
+
+    Args:
+        path: Path to the .geoh5 file.
+
+    Returns:
+        UIDs of objects with no load issue, in file order.
+    """
+    with open_workspace(path) as workspace:
+        return [
+            o.uid for o in list_objects(workspace) if _safe_issue(workspace, o) is None
+        ]
+
+
+def _safe_issue(workspace, info: ObjectInfo) -> str | None:
+    """load_issue(), turning a malformed object into an issue instead of failing."""
+    try:
+        return load_issue(workspace, info)
+    except (KeyError, RuntimeError, ValueError) as exc:
+        return f"cannot read object: {exc}"
+
+
 def _add_file(path: str, context) -> None:
     try:
-        with open_workspace(path) as workspace:
-            uids = [o.uid for o in list_objects(workspace) if o.kind != UNSUPPORTED]
+        uids = loadable_object_uids(path)
     except (RuntimeError, ValueError, FileNotFoundError) as exc:
         _report([f"{Path(path).name}: {exc}"], context.messageBar())
         return

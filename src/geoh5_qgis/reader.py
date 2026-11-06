@@ -38,6 +38,10 @@ INTEGER_NDV = -2147483648
 
 # Data primitive types that map to attribute columns.
 ATTRIBUTE_PRIMITIVES = frozenset({"Float", "Integer", "Referenced", "Text", "Boolean"})
+# Primitive types that become numeric raster bands / mesh datasets.
+NUMERIC_PRIMITIVES = frozenset({"Float", "Integer", "Boolean"})
+# Grids with |dip| below this (degrees) count as horizontal (absorbs float noise).
+DIP_TOLERANCE = 1e-6
 
 _COMPOUND_FORMATS = {
     gdal.GDT_Float64: "<f8",
@@ -302,6 +306,47 @@ def read_attributes(
             values = _map_values(values, read_value_map(workspace, info.uid) or {})
         columns[_unique_name(info.name, columns)] = values
     return columns
+
+
+def is_horizontal(frame: Grid2DFrame) -> bool:
+    """Whether a Grid2D lies flat, so it can be shown as a map raster.
+
+    Args:
+        frame: The grid's placement.
+
+    Returns:
+        True if not vertical and |dip| is within DIP_TOLERANCE degrees.
+    """
+    return not frame.vertical and abs(frame.dip) < DIP_TOLERANCE
+
+
+def load_issue(workspace: Workspace, info: ObjectInfo) -> str | None:
+    """Explain why an object cannot be loaded as a layer, if it cannot.
+
+    Reads only attributes and the data list, never data values, so it is cheap
+    enough to call for every object when listing a file.
+
+    Args:
+        workspace: Project group from open_workspace().
+        info: The object, from list_objects().
+
+    Returns:
+        A short user-facing reason, or None if the object can be loaded.
+    """
+    if info.kind == UNSUPPORTED:
+        return "object type not supported yet"
+    if info.kind != GRID2D:
+        return None
+    frame = read_grid2d_frame(workspace, info.uid)
+    if not is_horizontal(frame):
+        orientation = "vertical" if frame.vertical else f"dipping ({frame.dip:g}°)"
+        return f"{orientation} Grid2D: only horizontal grids can be shown on the map"
+    data = list_data(workspace, info.uid)
+    if not any(
+        d.association == "Cell" and d.primitive_type in NUMERIC_PRIMITIVES for d in data
+    ):
+        return "Grid2D has no numeric cell data to display"
+    return None
 
 
 def read_crs(workspace: Workspace, object_uid: str) -> str | None:

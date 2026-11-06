@@ -19,8 +19,11 @@ from conftest import (
     SURFACE_VERTICES,
 )
 from geoh5_qgis.reader import (
+    Grid2DFrame,
+    is_horizontal,
     list_data,
     list_objects,
+    load_issue,
     open_workspace,
     read_cells,
     read_crs,
@@ -182,3 +185,43 @@ def test_real_grid2d_origin_from_geoscience_analyst() -> None:
         frame = read_grid2d_frame(ws, object_by_name(ws, "airborne data").uid)
     np.testing.assert_allclose(frame.origin, (315532.25, 6065072.56, 172.0), atol=0.01)
     assert (frame.u_count, frame.v_count, frame.rotation) == (132, 356, 20.0)
+
+
+def issues_by_name(path: Path) -> dict[str, str | None]:
+    with open_workspace(path) as ws:
+        return {o.name: load_issue(ws, o) for o in list_objects(ws)}
+
+
+def test_loadable_objects_have_no_issue(geoh5_file: Path) -> None:
+    assert set(issues_by_name(geoh5_file).values()) == {None}
+
+
+def test_grid_issues(grid_issues_file: Path) -> None:
+    issues = issues_by_name(grid_issues_file)
+    assert "dipping" in issues["dipping"] and "-35" in issues["dipping"]
+    assert "vertical" in issues["vertical"]
+    assert issues["nearly_flat"] is None  # within DIP_TOLERANCE
+    assert "no numeric cell data" in issues["empty"]
+    assert "no numeric cell data" in issues["text_only"]
+
+
+def test_is_horizontal_tolerance() -> None:
+    def frame(dip: float, vertical: bool = False) -> Grid2DFrame:
+        return Grid2DFrame((0.0, 0.0, 0.0), 1.0, 1.0, 2, 2, 0.0, dip, vertical)
+
+    assert is_horizontal(frame(0.0))
+    assert is_horizontal(frame(-1e-9))
+    assert not is_horizontal(frame(-35.0))
+    assert not is_horizontal(frame(0.0, vertical=True))
+
+
+@pytest.mark.skipif(not ASSETS.exists(), reason="geoh5vista assets not available")
+def test_real_grid_issues() -> None:
+    issues = issues_by_name(ASSETS / "grid2d" / "grid2d_examples.geoh5")
+    assert "dipping" in issues["i_grid"]
+    assert "dipping" in issues["v_grid"]
+    assert "no numeric cell data" in issues["h_grid"]
+    real = issues_by_name(ASSETS / "grid2d" / "grid2d_test_a.geoh5")
+    assert real["airborne data"] is None  # dip stored as -0.0
+    blocks = issues_by_name(ASSETS / "block_model" / "test_bm.geoh5")
+    assert all("not supported" in issue for issue in blocks.values())

@@ -277,3 +277,9 @@ def test_vertex_parts_follow_segment_parts() -> None:
     np.testing.assert_array_equal(vertex_parts(CURVE_CELLS, 5), [0, 0, 0, 1, 1])
     # A vertex used by no segment gets part -1.
     np.testing.assert_array_equal(vertex_parts(np.array([[0, 1]]), 3), [0, 0, -1])
+
+
+def test_nearly_flat_grid_loads_as_raster(grid_issues_file: Path) -> None:
+    layer = load_object_layer(grid_issues_file, uid_of(grid_issues_file, "nearly_flat"))
+    assert isinstance(layer, QgsRasterLayer)
+    assert layer.isValid()

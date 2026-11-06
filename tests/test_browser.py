@@ -1,6 +1,7 @@
 """Tests for the Browser panel integration (needs QGIS via pytest-qgis)."""
 
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from qgis.core import Qgis, QgsProject
@@ -14,6 +15,7 @@ from geoh5_qgis.browser import (
     Geoh5FileItem,
     Geoh5ObjectItem,
     add_objects,
+    loadable_object_uids,
     parse_object_uri,
 )
 from geoh5_qgis.reader import list_objects, open_workspace
@@ -122,3 +124,30 @@ def test_add_objects_adds_every_layer_of_an_object(
     assert errors == []
     assert [layer.name() for layer in layers] == ["line", "line vertices"]
     assert len(project.mapLayers()) == 2
+
+
+def test_blocked_object_items_explain_why(grid_issues_file: Path) -> None:
+    items = object_items(grid_issues_file)
+    dipping = items["dipping"]
+    assert dipping.issue is not None
+    assert "dipping" in dipping.toolTip()
+    assert not dipping.hasDragEnabled()
+    assert items["nearly_flat"].issue is None
+    assert items["nearly_flat"].hasDragEnabled()
+
+
+def test_double_click_on_blocked_item_reports_and_adds_nothing(
+    grid_issues_file: Path, project: QgsProject
+) -> None:
+    item = object_items(grid_issues_file)["vertical"]
+    context = MagicMock()
+    assert Geoh5DataItemGuiProvider().handleDoubleClick(item, context) is True
+    assert project.mapLayers() == {}
+    message = context.messageBar().pushWarning.call_args.args[1]
+    assert "vertical" in message
+
+
+def test_loadable_object_uids_skips_blocked_objects(grid_issues_file: Path) -> None:
+    assert loadable_object_uids(grid_issues_file) == [
+        uid_of(grid_issues_file, "nearly_flat")
+    ]
