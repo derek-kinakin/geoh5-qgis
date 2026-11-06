@@ -17,11 +17,60 @@ objects to a QGIS project as in-memory layers.
   surfaces load as vector
   layers.
 
-To try it, point `QGIS_PLUGINPATH` at this repo's `src` folder, start QGIS 4.x and enable
-**geoh5 Browser** in the Plugin Manager.
-
 The plugin reads geoh5 with GDAL, which ships with QGIS, so users don't need to install
 any extra Python packages.
+
+## Installing from this repo
+
+Requires QGIS 4.x. The plugin is the folder `src\geoh5_qgis`. Pick one option:
+
+### Option 1: point QGIS at the repo (best while developing)
+
+QGIS loads the plugin straight from the repo, so code changes apply after restarting QGIS.
+
+1. In QGIS, open **Settings → Options → System → Environment**, tick **Use custom
+   variables** and add:
+   - Apply: **Append**
+   - Variable: `QGIS_PLUGINPATH`
+   - Value: the repo's `src` folder, e.g. `C:\Users\<you>\Dev\geoh5-qgis\src`
+2. Restart QGIS.
+3. Open **Plugins → Manage and Install Plugins → Installed** and tick **geoh5 Browser**.
+
+To reload after code changes without restarting, install the **Plugin Reloader** plugin.
+
+### Option 2: link the folder into your QGIS profile
+
+1. In QGIS, open **Settings → User Profiles → Open Active Profile Folder**, then go into
+   `python\plugins` (create it if it is missing).
+2. From a Command Prompt in that `plugins` folder, link it to the repo:
+
+   ```console
+   mklink /J geoh5_qgis C:\Users\<you>\Dev\geoh5-qgis\src\geoh5_qgis
+   ```
+
+   (Copying the folder also works, but must be repeated after every change.)
+3. Restart QGIS and enable **geoh5 Browser** as in Option 1.
+
+### Option 3: install from a ZIP (for sharing with colleagues)
+
+1. Build the ZIP from the repo root (any Python 3.12+, including QGIS's own):
+
+   ```console
+   python scripts/build_plugin_zip.py
+   ```
+
+   This writes `dist/geoh5_qgis-<version>.zip` with the plugin folder at its top level
+   and no Python caches. Use `--out <folder>` to write it elsewhere.
+2. In QGIS, open **Plugins → Manage and Install Plugins → Install from ZIP** and choose
+   the ZIP.
+
+### After enabling
+
+- In the **Browser** panel, go to a folder containing `.geoh5` files and expand them.
+- The plugin is marked experimental. If it does not appear in the Plugin Manager, tick
+  **Show also experimental plugins** on the manager's **Settings** tab.
+- The development environment below (conda env, pytest, geoh5py) is not needed to use
+  the plugin.
 
 ## Development
 
