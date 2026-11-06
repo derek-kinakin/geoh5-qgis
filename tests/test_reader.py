@@ -47,6 +47,7 @@ def test_list_objects_identifies_kinds(geoh5_file: Path) -> None:
     assert kinds == {
         "pts": "Points",
         "line": "Curve",
+        "bare_line": "Curve",
         "topo": "Surface",
         "zoned": "Surface",
         "shaded": "Surface",

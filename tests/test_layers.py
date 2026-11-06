@@ -19,6 +19,7 @@ from qgis.core import (
 
 from conftest import (
     CURVE_CELLS,
+    CURVE_VERTICES,
     POINT_INTS,
     POINT_TEXT,
     POINT_VERTICES,
@@ -29,8 +30,10 @@ from conftest import (
 from geoh5_qgis.layers import (
     curve_parts,
     load_object_layer,
+    load_object_layers,
     mesh_dataset_name,
     mesh_display_name,
+    vertex_parts,
 )
 from geoh5_qgis.reader import Grid2DFrame, list_objects, open_workspace
 
@@ -239,3 +242,38 @@ def test_mesh_group_names_with_spaces_survive() -> None:
         "Residual Magnetic"
     )
     assert " " not in mesh_dataset_name("Residual Magnetic")
+
+
+def test_curve_with_vertex_data_adds_a_vertex_point_layer(geoh5_file: Path) -> None:
+    uid = uid_of(geoh5_file, "line")
+    segments, vertices = load_object_layers(geoh5_file, uid)
+    assert segments.name() == "line"
+    assert segments.wkbType() == QgsWkbTypes.Type.LineStringZ
+    assert "depth" not in segments.fields().names()
+
+    assert vertices.name() == "line vertices"
+    assert vertices.wkbType() == QgsWkbTypes.Type.PointZ
+    assert vertices.featureCount() == len(CURVE_VERTICES)
+    xyz = [
+        (g.x(), g.y(), g.z())
+        for g in (f.geometry().constGet() for f in vertices.getFeatures())
+    ]
+    np.testing.assert_allclose(xyz, CURVE_VERTICES)
+    rows = attribute_rows(vertices)
+    assert [r["vertex"] for r in rows] == [0, 1, 2, 3, 4]
+    assert [r["part"] for r in rows] == [0, 0, 0, 1, 1]
+    assert [r["depth"] for r in rows] == [0.0, 1.5, NULL, 4.0, 5.5]
+    assert vertices.customProperty("geoh5/uid") == uid
+    assert vertices.customProperty("geoh5/role") == "vertices"
+    assert segments.customProperty("geoh5/role") is None
+
+
+def test_curve_without_vertex_data_is_one_layer(geoh5_file: Path) -> None:
+    layers = load_object_layers(geoh5_file, uid_of(geoh5_file, "bare_line"))
+    assert [layer.name() for layer in layers] == ["bare_line"]
+
+
+def test_vertex_parts_follow_segment_parts() -> None:
+    np.testing.assert_array_equal(vertex_parts(CURVE_CELLS, 5), [0, 0, 0, 1, 1])
+    # A vertex used by no segment gets part -1.
+    np.testing.assert_array_equal(vertex_parts(np.array([[0, 1]]), 3), [0, 0, -1])

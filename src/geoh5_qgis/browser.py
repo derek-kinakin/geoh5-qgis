@@ -26,7 +26,7 @@ from qgis.core import (
 from qgis.gui import QgsCustomDropHandler, QgsDataItemGuiProvider
 from qgis.PyQt.QtGui import QAction
 
-from geoh5_qgis.layers import load_object_layer
+from geoh5_qgis.layers import load_object_layers
 from geoh5_qgis.reader import (
     CURVE,
     GRID2D,
@@ -61,10 +61,11 @@ def add_objects(
         project: Project to add the layers to.
 
     Returns:
-        The added layers, and one error message per object that failed.
+        The added layers (an object can give more than one, e.g. a curve and
+        its vertices), and one error message per object that failed.
     """
     results = [_try_load(path, uid) for uid in uids]
-    layers = [r for r in results if isinstance(r, QgsMapLayer)]
+    layers = [layer for r in results if isinstance(r, list) for layer in r]
     errors = [r for r in results if isinstance(r, str)]
     project.addMapLayers(layers)
     return layers, errors
@@ -96,9 +97,9 @@ def parse_object_uri(uri: str) -> tuple[str, str]:
     return path, uid
 
 
-def _try_load(path: str | Path, uid: str) -> QgsMapLayer | str:
+def _try_load(path: str | Path, uid: str) -> list[QgsMapLayer] | str:
     try:
-        return load_object_layer(path, uid)
+        return load_object_layers(path, uid)
     except (KeyError, ValueError, RuntimeError, FileNotFoundError) as exc:
         return f"{Path(path).name} {uid}: {exc}"
 

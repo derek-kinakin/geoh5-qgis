@@ -43,6 +43,9 @@ from geoh5_qgis.reader import (
 
 PATH_PROPERTY = "geoh5/path"
 UID_PROPERTY = "geoh5/uid"
+ROLE_PROPERTY = "geoh5/role"
+VERTEX_ROLE = "vertices"
+VERTEX_LAYER_SUFFIX = " vertices"
 VSIMEM_DIR = "/vsimem/geoh5_qgis"
 MESH_MEMORY_PROVIDER = "mesh_memory"
 ELEVATION_DATASET = "Z"
@@ -56,10 +59,13 @@ WKB_MULTIPOLYGON_Z = 1006
 _raster_counter = itertools.count()
 
 
-def load_object_layer(
+def load_object_layers(
     path: str | Path, object_uid: str, crs: str | None = None
-) -> QgsMapLayer:
-    """Build a QGIS layer for one geoh5 object.
+) -> list[QgsMapLayer]:
+    """Build the QGIS layers for one geoh5 object.
+
+    Most objects give one layer. A curve with vertex data also gives a PointZ
+    "<name> vertices" layer (custom property ``geoh5/role`` = ``"vertices"``).
 
     Args:
         path: Path to the .geoh5 file.
@@ -68,8 +74,8 @@ def load_object_layer(
             the object's metadata, if any.
 
     Returns:
-        A QgsVectorLayer (Points, Curve, Surface), a QgsMeshLayer (Surface with
-        vertex data) or a QgsRasterLayer (Grid2D).
+        The main layer first: a QgsVectorLayer (Points, Curve, Surface), a
+        QgsMeshLayer (Surface with vertex data) or a QgsRasterLayer (Grid2D).
 
     Raises:
         KeyError: If the object does not exist.
@@ -80,39 +86,65 @@ def load_object_layer(
         if info is None:
             raise KeyError(f"No object {object_uid!r} in {path}")
         crs = crs or read_crs(workspace, object_uid)
-        layer = _build_layer(workspace, info.kind, info.name, object_uid, crs)
-    layer.setCustomProperty(PATH_PROPERTY, str(path))
-    layer.setCustomProperty(UID_PROPERTY, object_uid)
-    return layer
+        layers = _build_layers(workspace, info.kind, info.name, object_uid, crs)
+    for layer in layers:
+        layer.setCustomProperty(PATH_PROPERTY, str(path))
+        layer.setCustomProperty(UID_PROPERTY, object_uid)
+    return layers
 
 
-def _build_layer(
-    workspace: Workspace, kind: str, name: str, uid: str, crs: str | None
+def load_object_layer(
+    path: str | Path, object_uid: str, crs: str | None = None
 ) -> QgsMapLayer:
+    """Build the main QGIS layer for one geoh5 object.
+
+    Args:
+        path: Path to the .geoh5 file.
+        object_uid: Object group name, as reported by reader.list_objects().
+        crs: CRS to assign; defaults to the object's stored CRS, if any.
+
+    Returns:
+        The first layer from load_object_layers().
+
+    Raises:
+        KeyError: If the object does not exist.
+        ValueError: If the object kind is unsupported or cannot be mapped.
+    """
+    return load_object_layers(path, object_uid, crs)[0]
+
+
+def _build_layers(
+    workspace: Workspace, kind: str, name: str, uid: str, crs: str | None
+) -> list[QgsMapLayer]:
     if kind == POINTS:
         vertices = read_vertices(workspace, uid)
         attributes = read_attributes(workspace, uid, "Vertex", len(vertices))
-        return points_layer(name, vertices, attributes, crs)
+        return [points_layer(name, vertices, attributes, crs)]
     if kind == CURVE:
         vertices = read_vertices(workspace, uid)
         cells = read_cells(workspace, uid)
-        attributes = read_attributes(workspace, uid, "Cell", len(cells))
-        return curve_layer(name, vertices, cells, attributes, crs)
+        cell_data = read_attributes(workspace, uid, "Cell", len(cells))
+        vertex_data = read_attributes(workspace, uid, "Vertex", len(vertices))
+        layers = [curve_layer(name, vertices, cells, cell_data, crs)]
+        if vertex_data:
+            layers.append(curve_vertex_layer(name, vertices, cells, vertex_data, crs))
+        return layers
     if kind == SURFACE:
         vertices = read_vertices(workspace, uid)
         cells = read_cells(workspace, uid)
         cell_data = read_attributes(workspace, uid, "Cell", len(cells))
         vertex_data = _numeric(read_attributes(workspace, uid, "Vertex", len(vertices)))
         if vertex_data:
-            return surface_mesh_layer(
+            mesh = surface_mesh_layer(
                 name, vertices, cells, vertex_data, _numeric(cell_data), crs
             )
-        return surface_layer(name, vertices, cells, cell_data, crs)
+            return [mesh]
+        return [surface_layer(name, vertices, cells, cell_data, crs)]
     if kind == GRID2D:
         frame = read_grid2d_frame(workspace, uid)
         n_cells = frame.u_count * frame.v_count
         bands = _numeric(read_attributes(workspace, uid, "Cell", n_cells))
-        return grid2d_layer(name, uid, frame, bands, crs)
+        return [grid2d_layer(name, uid, frame, bands, crs)]
     raise ValueError(f"Object {name!r} has unsupported kind {kind!r}")
 
 
@@ -160,8 +192,45 @@ def curve_layer(
         The memory layer.
     """
     geometries = _wkb_geometries(WKB_LINESTRING_Z, (2,), vertices[cells])
-    columns = {"part": curve_parts(cells)} | attributes
+    columns = _prepend({"part": curve_parts(cells)}, attributes)
     return _vector_layer("LineStringZ", name, crs, geometries, columns)
+
+
+def curve_vertex_layer(
+    name: str,
+    vertices: np.ndarray,
+    cells: np.ndarray,
+    attributes: dict[str, np.ndarray],
+    crs: str | None,
+) -> QgsVectorLayer:
+    """Build a PointZ layer of a curve's vertices, carrying its vertex data.
+
+    ``vertex`` (index) and ``part`` columns link each point back to the curve's
+    segments. The layer is named "<name> vertices" and has custom property
+    ``geoh5/role`` = ``"vertices"``.
+
+    Args:
+        name: Curve name.
+        vertices: (n, 3) x, y, z array.
+        cells: (m, 2) vertex indices of each segment.
+        attributes: Column name to length-n (vertex) array.
+        crs: CRS string, or None to leave it unset.
+
+    Returns:
+        The memory layer.
+    """
+    index_columns = {
+        "vertex": np.arange(len(vertices), dtype=np.int64),
+        "part": vertex_parts(cells, len(vertices)),
+    }
+    layer = points_layer(
+        f"{name}{VERTEX_LAYER_SUFFIX}",
+        vertices,
+        _prepend(index_columns, attributes),
+        crs,
+    )
+    layer.setCustomProperty(ROLE_PROPERTY, VERTEX_ROLE)
+    return layer
 
 
 def surface_layer(
@@ -367,6 +436,31 @@ def curve_parts(cells: np.ndarray) -> np.ndarray:
     roots = [find(a) for a, _ in cells.tolist()]
     numbering = {root: n for n, root in enumerate(dict.fromkeys(roots))}
     return np.array([numbering[root] for root in roots], dtype=np.int64)
+
+
+def vertex_parts(cells: np.ndarray, n_vertices: int) -> np.ndarray:
+    """Part number of each curve vertex (see curve_parts).
+
+    Args:
+        cells: (m, 2) vertex indices of each segment.
+        n_vertices: Number of vertices in the curve.
+
+    Returns:
+        Length-n int array; -1 for vertices used by no segment.
+    """
+    parts = np.full(n_vertices, -1, dtype=np.int64)
+    segment_parts = curve_parts(cells)
+    parts[cells[:, 0]] = segment_parts
+    parts[cells[:, 1]] = segment_parts
+    return parts
+
+
+def _prepend(
+    fixed: dict[str, np.ndarray], data: dict[str, np.ndarray]
+) -> dict[str, np.ndarray]:
+    """Fixed columns first; data columns renamed (``name_2``) if they clash."""
+    taken = set(fixed)
+    return fixed | {_unique(k, taken): v for k, v in data.items()}
 
 
 def _vector_layer(

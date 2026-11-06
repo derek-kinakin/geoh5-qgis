@@ -31,6 +31,7 @@ CURVE_VERTICES = np.array(
     ]
 )
 CURVE_CELLS = np.array([[0, 1], [1, 2], [3, 4]], dtype=np.uint32)
+CURVE_VERTEX_DEPTHS = np.array([0.0, 1.5, np.nan, 4.0, 5.5])
 SURFACE_VERTICES = np.array(
     [[0.0, 0.0, 0.0], [1.0, 0.0, 0.5], [0.0, 1.0, 1.0], [1.0, 1.0, 1.5]]
 )
@@ -69,8 +70,12 @@ def geoh5_file(tmp_path_factory: pytest.TempPathFactory) -> Path:
             ws, name="line", vertices=CURVE_VERTICES, cells=CURVE_CELLS
         )
         curve.add_data(
-            {"seg_id": {"values": np.array([1.0, 2.0, 3.0]), "association": "CELL"}}
+            {
+                "seg_id": {"values": np.array([1.0, 2.0, 3.0]), "association": "CELL"},
+                "depth": {"values": CURVE_VERTEX_DEPTHS},
+            }
         )
+        Curve.create(ws, name="bare_line", vertices=CURVE_VERTICES, cells=CURVE_CELLS)
         Surface.create(ws, name="topo", vertices=SURFACE_VERTICES, cells=SURFACE_CELLS)
         zoned = Surface.create(
             ws, name="zoned", vertices=SURFACE_VERTICES, cells=SURFACE_CELLS

@@ -48,7 +48,15 @@ def test_provider_only_handles_geoh5_files(geoh5_file: Path, tmp_path: Path) -> 
 
 def test_file_item_lists_objects_sorted_by_name(geoh5_file: Path) -> None:
     items = object_items(geoh5_file)
-    assert list(items) == ["grid", "line", "pts", "shaded", "topo", "zoned"]
+    assert list(items) == [
+        "bare_line",
+        "grid",
+        "line",
+        "pts",
+        "shaded",
+        "topo",
+        "zoned",
+    ]
     assert all(isinstance(i, Geoh5ObjectItem) for i in items.values())
     assert items["pts"].kind == "Points"
     assert items["pts"].uid == uid_of(geoh5_file, "pts")
@@ -105,3 +113,12 @@ def test_drop_handler_adds_layer(geoh5_file: Path, project: QgsProject) -> None:
     assert handler.customUriProviderKey() == PROVIDER_KEY
     handler.handleCustomUriDrop(uri)
     assert [layer.name() for layer in project.mapLayers().values()] == ["grid"]
+
+
+def test_add_objects_adds_every_layer_of_an_object(
+    geoh5_file: Path, project: QgsProject
+) -> None:
+    layers, errors = add_objects(geoh5_file, [uid_of(geoh5_file, "line")], project)
+    assert errors == []
+    assert [layer.name() for layer in layers] == ["line", "line vertices"]
+    assert len(project.mapLayers()) == 2
