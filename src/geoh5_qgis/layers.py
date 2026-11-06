@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 from osgeo import gdal, osr
 from qgis.core import (
+    QgsApplication,
     QgsCoordinateReferenceSystem,
     QgsFeature,
     QgsField,
@@ -20,9 +21,11 @@ from qgis.core import (
     QgsMapLayer,
     QgsMeshLayer,
     QgsRasterLayer,
+    QgsReadWriteContext,
     QgsVectorLayer,
 )
 from qgis.PyQt.QtCore import QMetaType
+from qgis.PyQt.QtXml import QDomDocument
 
 from geoh5_qgis.reader import (
     CURVE,
@@ -49,6 +52,7 @@ VERTEX_ROLE = "vertices"
 VERTEX_LAYER_SUFFIX = " vertices"
 VSIMEM_DIR = "/vsimem/geoh5_qgis"
 MESH_MEMORY_PROVIDER = "mesh_memory"
+MESH_3D_RENDERER = "mesh"
 ELEVATION_DATASET = "Z"
 NBSP = " "
 # ISO WKB geometry type codes (Z variants).
@@ -319,7 +323,41 @@ def surface_mesh_layer(
     triangular.setEnabled(False)
     settings.setTriangularMeshSettings(triangular)
     layer.setRendererSettings(settings)
+    _set_3d_height_from_dataset(layer, 0)  # 0 = elevation
     return layer
+
+
+def _set_3d_height_from_dataset(layer: QgsMeshLayer, group_index: int) -> None:
+    """Make QGIS 3D views take vertex heights from a dataset group.
+
+    QgsMeshLayer3DRenderer is not exposed to Python in QGIS 4.2, so the renderer
+    is built from XML through the 3D renderer registry. Skipped if the 3D
+    module is unavailable.
+    """
+    try:
+        import qgis._3d as q3d
+    except ImportError:
+        return
+    registry = QgsApplication.renderer3DRegistry()
+    if MESH_3D_RENDERER not in registry.renderersList():
+        q3d.Qgs3D.initialize()  # already done by the desktop app
+    symbol = q3d.QgsMesh3DSymbol()
+    symbol.setVerticalDatasetGroupIndex(group_index)
+    symbol.setIsVerticalMagnitudeRelative(False)  # dataset value is the height
+    symbol.setVerticalScale(1.0)
+    symbol.setSmoothedTriangles(True)
+    symbol.setRenderingStyle(q3d.QgsMesh3DSymbol.RenderingStyle.ColorRamp2DRendering)
+
+    doc = QDomDocument()
+    context = QgsReadWriteContext()
+    renderer_elem = doc.createElement("renderer-3d")
+    renderer_elem.setAttribute("layer", layer.id())
+    symbol_elem = doc.createElement("symbol")
+    symbol_elem.setAttribute("type", symbol.type())
+    symbol.writeXml(symbol_elem, context)
+    renderer_elem.appendChild(symbol_elem)
+    metadata = registry.rendererMetadata(MESH_3D_RENDERER)
+    layer.setRenderer3D(metadata.createRenderer(renderer_elem, context))
 
 
 def mesh_dataset_name(name: str) -> str:

@@ -238,3 +238,5 @@ def test_background_load_of_a_mesh_and_raster(
     add_objects_in_background(geoh5_file, uids, project)
     assert layer_names_when_loaded(project, 2) == ["grid", "shaded"]
     assert all(layer.isValid() for layer in project.mapLayers().values())
+    (mesh,) = project.mapLayersByName("shaded")
+    assert mesh.renderer3D() is not None  # survives the worker-thread build

@@ -13,9 +13,11 @@ from qgis.core import (
     QgsMeshLayer,
     QgsPointXY,
     QgsRasterLayer,
+    QgsReadWriteContext,
     QgsVectorLayer,
     QgsWkbTypes,
 )
+from qgis.PyQt.QtXml import QDomDocument
 
 from conftest import (
     CURVE_CELLS,
@@ -283,3 +285,25 @@ def test_nearly_flat_grid_loads_as_raster(grid_issues_file: Path) -> None:
     layer = load_object_layer(grid_issues_file, uid_of(grid_issues_file, "nearly_flat"))
     assert isinstance(layer, QgsRasterLayer)
     assert layer.isValid()
+
+
+def renderer_3d_xml(layer) -> str:
+    doc = QDomDocument()
+    elem = doc.createElement("renderer-3d")
+    layer.renderer3D().writeXml(elem, QgsReadWriteContext())
+    doc.appendChild(elem)
+    return doc.toString()
+
+
+def test_mesh_3d_view_takes_height_from_elevation_dataset(geoh5_file: Path) -> None:
+    layer = load_object_layer(geoh5_file, uid_of(geoh5_file, "shaded"))
+    renderer = layer.renderer3D()
+    assert renderer is not None
+    assert renderer.type() == "mesh"
+    xml = renderer_3d_xml(layer)
+    # Absolute height from dataset group 0 ("Z"), unscaled, smoothed.
+    assert 'vertical-group-index="0"' in xml
+    assert 'vertical-relative="0"' in xml
+    assert 'vertical-scale="1"' in xml
+    assert 'smoothed-triangle="1"' in xml
+    assert f'layer="{layer.id()}"' in xml
