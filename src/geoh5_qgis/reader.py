@@ -9,6 +9,7 @@ Layout used (geoh5 v2): one project group (normally ``GEOSCIENCE``) holding
 """
 
 import json
+import xml.etree.ElementTree as ET
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -41,6 +42,8 @@ OBJECT_KINDS = {
     "{77ac043c-fe8d-4d14-8167-75e300fb835a}": GEOIMAGE,
 }
 GEOIMAGE_DATA_NAME = "GeoImageMesh_Image"
+# Object-level Text data holding GA's display settings (XML).
+VISUAL_PARAMETERS_NAME = "Visual Parameters"
 
 # No-data sentinels used by GEOSCIENCE ANALYST / geoh5py (geoh5py/shared/__init__.py).
 FLOAT_NDV = 1.17549435e-38
@@ -104,6 +107,8 @@ class DataInfo:
     name: str
     association: str
     primitive_type: str
+    # The channel GEOSCIENCE ANALYST was colouring the object by.
+    visible: bool = False
 
 
 @dataclass(frozen=True)
@@ -123,8 +128,11 @@ class DataChannel:
     units: str | None = None
     # Key to name, for Referenced data only.
     value_map: dict[int, str] | None = None
-    # (n, 5) rows of value, red, green, blue, alpha (colours 0-255).
+    # (n, 5) rows of value, red, green, blue, alpha (colours 0-255). Values are
+    # data values (GA's linear/equal-area mapping is already applied) or, for
+    # Referenced and Boolean data, keys.
     color_map: np.ndarray | None = None
+    visible: bool = False
 
 
 @dataclass(frozen=True)
@@ -383,7 +391,43 @@ def read_channel(workspace: Workspace, info: DataInfo) -> DataChannel:
         units=units or None,
         value_map=read_value_map(workspace, info.uid) if referenced else None,
         color_map=_read_color_map(data_type) if data_type else None,
+        visible=info.visible,
     )
+
+
+def read_object_colour(
+    workspace: Workspace, object_uid: str
+) -> tuple[int, int, int, int] | None:
+    """Read the colour GEOSCIENCE ANALYST draws an object in.
+
+    Args:
+        workspace: Project group from open_workspace().
+        object_uid: Object group name.
+
+    Returns:
+        Red, green, blue, alpha (0-255) from the object's "Visual Parameters",
+        or None if it has none or they cannot be parsed.
+
+    Raises:
+        KeyError: If the object does not exist.
+    """
+    info = next(
+        (
+            d
+            for d in list_data(workspace, object_uid)
+            if d.name == VISUAL_PARAMETERS_NAME and d.association == "Object"
+        ),
+        None,
+    )
+    if info is None:
+        return None
+    values = read_data_values(workspace, info.uid)
+    try:
+        colour = ET.fromstring(str(values[0])).findtext("Colour")
+        argb = int(colour or "")
+    except (ET.ParseError, ValueError, IndexError):
+        return None
+    return (argb >> 16) & 255, (argb >> 8) & 255, argb & 255, (argb >> 24) & 255
 
 
 def read_tree(workspace: Workspace) -> list[TreeNode]:
@@ -722,6 +766,7 @@ def _data_info(uid: str, data: gdal.Group) -> DataInfo | None:
         name=str(attrs.get("Name", "")),
         association=str(attrs.get("Association", "")),
         primitive_type=str(type_attrs.get("Primitive type", "")),
+        visible=bool(attrs.get("Visible", 0)),
     )
 
 

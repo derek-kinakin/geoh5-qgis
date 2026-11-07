@@ -39,6 +39,11 @@ Background research and decisions: `docs/research/geoh5-qgis-plugin-research.md`
   `GetView('["Key"]')` / `GetView('["Value"]')`.
 - Float no-data is `1.17549435e-38` (converted to NaN); integer no-data is `-2147483648`.
 - Some files have no `/Objects` group at all (e.g. drillhole-only files).
+- GA display settings: the data channel GA shows has `Visible = 1` (one per object).
+  `Color map` values are data values with GA's linear/equal-area mapping already
+  applied (keys for Referenced/Boolean); some maps have every value equal (spread
+  them over the data). The object colour is `<Colour>` (ARGB uint32) in the
+  object-level Text data "Visual Parameters". geoh5py 0.13 does not write `Units`.
 
 ## QGIS layer gotchas
 

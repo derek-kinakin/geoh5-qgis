@@ -127,6 +127,8 @@ TYPED_INTS = np.array([5, -2147483648, 7, 0], dtype=np.int32)  # 2nd is no-data
 TYPED_FLAGS = np.array([True, False, True, False])
 TYPED_DATES = ["2024-01-02T03:04:05", "2024-02-03", "", "2024-03-04T12:00:00+02:00"]
 TYPED_UNITS = "g/t"
+# Boolean colour map rows for False and True (GA hides False).
+FLAG_COLOURS = [(90, 90, 90, 0), (255, 61, 61, 255)]
 # Value, red, green, blue, alpha.
 TYPED_COLOR_MAP = np.array(
     [[0.0, 0, 0, 255, 255], [4.0, 0, 255, 0, 255], [8.0, 255, 0, 0, 255]]
@@ -136,7 +138,8 @@ TYPED_COLOR_MAP = np.array(
 @pytest.fixture(scope="session")
 def channels_file(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Points 'typed' with one channel of each primitive type; 'au' has units and
-    a colour map. Grid2D 'zones' has a referenced cell channel."""
+    a colour map and is the shown channel. Points 'flagged' shows a boolean
+    channel with a colour map. Grid2D 'zones' has a referenced cell channel."""
     path = tmp_path_factory.mktemp("geoh5") / "channels.geoh5"
     with Workspace.create(path) as ws:
         points = Points.create(ws, name="typed", vertices=POINT_VERTICES)
@@ -174,8 +177,20 @@ def channels_file(tmp_path_factory: pytest.TempPathFactory) -> Path:
                 }
             }
         )
-    with h5py.File(path, "r+") as f:  # geoh5py 0.13 does not write units
-        f["GEOSCIENCE"]["Data"][f"{{{au_uid}}}"]["Type"].attrs["Units"] = TYPED_UNITS
+        flagged = Points.create(ws, name="flagged", vertices=POINT_VERTICES)
+        flag = flagged.add_data({"flag": {"type": "boolean", "values": TYPED_FLAGS}})
+        flag.entity_type.color_map = np.rec.fromarrays(
+            [np.array([0.0, 1.0])]
+            + [np.array(c, dtype="u1") for c in zip(*FLAG_COLOURS, strict=True)],
+            names="Value,Red,Green,Blue,Alpha",
+        )
+        flag_uid = str(flag.uid)
+    with h5py.File(path, "r+") as f:
+        data = f["GEOSCIENCE"]["Data"]
+        data[f"{{{au_uid}}}"]["Type"].attrs["Units"] = TYPED_UNITS  # not written
+        # The channels GA would be showing.
+        data[f"{{{au_uid}}}"].attrs["Visible"] = np.int8(1)
+        data[f"{{{flag_uid}}}"].attrs["Visible"] = np.int8(1)
     return path
 
 

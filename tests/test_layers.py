@@ -35,7 +35,7 @@ from conftest import (
     TYPED_UNITS,
 )
 from geoh5_qgis.layers import (
-    _with_aliases,
+    _finish,
     channel_columns,
     curve_layer,
     curve_parts,
@@ -126,14 +126,17 @@ def test_points_values_round_trip_with_no_data_as_null(channels_file: Path) -> N
 
 def test_aliases_follow_renamed_channel_columns() -> None:
     # A curve channel named like the fixed "part" column is renamed "part_2";
-    # its alias must land on that field, not on the fixed one.
-    channel = DataChannel("{u}", "part", "Cell", "Float", np.ones(3), units="m")
-    columns, aliases = channel_columns([channel])
-    layer = curve_layer("c", CURVE_VERTICES, CURVE_CELLS, columns, None)
-    _with_aliases(layer, aliases)
+    # its alias and style must land on that field, not on the fixed one.
+    channel = DataChannel(
+        "{u}", "part", "Cell", "Float", np.arange(3.0), units="m", visible=True
+    )
+    data = channel_columns([channel])
+    layer = curve_layer("c", CURVE_VERTICES, CURVE_CELLS, data.columns, None)
+    _finish(layer, data, None)
     assert layer.fields().names() == ["part", "part_2"]
     assert layer.fields().field("part").alias() == ""
     assert layer.fields().field("part_2").alias() == "part (m)"
+    assert layer.renderer().classAttribute() == "part_2"
 
 
 def test_referenced_grid2d_channel_becomes_a_band(channels_file: Path) -> None:

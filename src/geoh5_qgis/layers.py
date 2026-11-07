@@ -8,6 +8,7 @@ custom properties, so the geoh5 file stays the source of truth.
 """
 
 import itertools
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -53,9 +54,11 @@ from geoh5_qgis.reader import (
     read_crs,
     read_geoimage,
     read_grid2d_frame,
+    read_object_colour,
     read_vertices,
 )
 from geoh5_qgis.sources import register_generated
+from geoh5_qgis.styles import apply_default_style
 from geoh5_qgis.tempfiles import is_temp_file, new_path
 
 PATH_PROPERTY = "geoh5/path"
@@ -160,46 +163,52 @@ def _build_layers(
 ) -> list[QgsMapLayer]:
     if kind == POINTS:
         vertices = read_vertices(workspace, uid)
-        columns, aliases = channel_columns(
-            read_channels(workspace, uid, "Vertex", len(vertices))
-        )
-        return [_with_aliases(points_layer(name, vertices, columns, crs), aliases)]
+        data = channel_columns(read_channels(workspace, uid, "Vertex", len(vertices)))
+        colour = read_object_colour(workspace, uid)
+        return [_finish(points_layer(name, vertices, data.columns, crs), data, colour)]
     if kind == CURVE:
         vertices = read_vertices(workspace, uid)
         cells = read_cells(workspace, uid)
-        cell_data, cell_aliases = channel_columns(
-            read_channels(workspace, uid, "Cell", len(cells))
-        )
-        vertex_data, vertex_aliases = channel_columns(
+        colour = read_object_colour(workspace, uid)
+        cell_data = channel_columns(read_channels(workspace, uid, "Cell", len(cells)))
+        vertex_data = channel_columns(
             read_channels(workspace, uid, "Vertex", len(vertices))
         )
-        curve = curve_layer(name, vertices, cells, cell_data, crs)
-        layers = [_with_aliases(curve, cell_aliases)]
-        if vertex_data:
-            vertex_layer = curve_vertex_layer(name, vertices, cells, vertex_data, crs)
-            layers.append(_with_aliases(vertex_layer, vertex_aliases))
+        curve = curve_layer(name, vertices, cells, cell_data.columns, crs)
+        layers = [_finish(curve, cell_data, colour)]
+        if vertex_data.columns:
+            vertex_layer = curve_vertex_layer(
+                name, vertices, cells, vertex_data.columns, crs
+            )
+            layers.append(_finish(vertex_layer, vertex_data, colour))
         return layers
     if kind == SURFACE:
         vertices = read_vertices(workspace, uid)
         cells = read_cells(workspace, uid)
-        cell_data, cell_aliases = channel_columns(
-            read_channels(workspace, uid, "Cell", len(cells))
-        )
+        cell_data = channel_columns(read_channels(workspace, uid, "Cell", len(cells)))
         if as_polygons:
-            polygons = surface_polygons_layer(name, vertices, cells, cell_data, crs)
-            return [_with_aliases(polygons, cell_aliases)]
-        vertex_data, _ = channel_columns(
+            polygons = surface_polygons_layer(
+                name, vertices, cells, cell_data.columns, crs
+            )
+            colour = read_object_colour(workspace, uid)
+            return [_finish(polygons, cell_data, colour)]
+        vertex_data = channel_columns(
             read_channels(workspace, uid, "Vertex", len(vertices))
         )
         mesh = surface_mesh_layer(
-            name, vertices, cells, _numeric(vertex_data), _numeric(cell_data), crs
+            name,
+            vertices,
+            cells,
+            _numeric(vertex_data.columns),
+            _numeric(cell_data.columns),
+            crs,
         )
         return [mesh]
     if kind == GRID2D:
         frame = read_grid2d_frame(workspace, uid)
         n_cells = frame.u_count * frame.v_count
-        bands, _ = channel_columns(read_channels(workspace, uid, "Cell", n_cells))
-        return [grid2d_layer(name, uid, frame, _numeric(bands), crs)]
+        bands = channel_columns(read_channels(workspace, uid, "Cell", n_cells))
+        return [grid2d_layer(name, uid, frame, _numeric(bands.columns), crs)]
     if kind == DRILLHOLES:
         return drillhole_layers(name, read_drillholes(workspace, uid), crs)
     if kind == GEOIMAGE:
@@ -212,10 +221,19 @@ def _build_layers(
     raise ValueError(f"Object {name!r} has unsupported kind {kind!r}")
 
 
-def channel_columns(
-    channels: list[DataChannel],
-) -> tuple[dict[str, np.ndarray], list[str | None]]:
-    """Turn data channels into attribute columns, with an alias per column.
+@dataclass(frozen=True)
+class ChannelColumns:
+    """Attribute columns made from data channels (see channel_columns)."""
+
+    columns: dict[str, np.ndarray]
+    # Per column, in order: its alias (None for none) and the channel whose
+    # stored values it holds (None for label columns).
+    aliases: tuple[str | None, ...]
+    sources: tuple[DataChannel | None, ...]
+
+
+def channel_columns(channels: list[DataChannel]) -> ChannelColumns:
+    """Turn data channels into attribute columns.
 
     Each channel gives a column of its stored values under its name (made unique
     with ``_2``, ``_3``...). A referenced channel keeps its integer keys and also
@@ -226,20 +244,22 @@ def channel_columns(
         channels: Channels from reader.read_channels().
 
     Returns:
-        Column name to values, and the alias of each column in the same order
-        (None for no alias).
+        The columns with their aliases and source channels.
     """
     taken: set[str] = set()
     columns: dict[str, np.ndarray] = {}
     aliases: list[str | None] = []
+    sources: list[DataChannel | None] = []
     for channel in channels:
         columns[_unique(channel.name, taken)] = channel.values
         aliases.append(f"{channel.name} ({channel.units})" if channel.units else None)
+        sources.append(channel)
         if channel.value_map is not None:
             label = _unique(f"{channel.name}{LABEL_SUFFIX}", taken)
             columns[label] = _labels(channel.values, channel.value_map)
             aliases.append(None)
-    return columns, aliases
+            sources.append(None)
+    return ChannelColumns(columns, tuple(aliases), tuple(sources))
 
 
 def _labels(keys: np.ndarray, value_map: dict[int, str]) -> np.ndarray:
@@ -247,16 +267,26 @@ def _labels(keys: np.ndarray, value_map: dict[int, str]) -> np.ndarray:
     return np.array([value_map.get(int(k), str(k)) for k in keys], dtype=object)
 
 
-def _with_aliases(layer: QgsVectorLayer, aliases: list[str | None]) -> QgsVectorLayer:
-    """Alias the layer's last fields, which builders fill from channel columns.
+def _finish(
+    layer: QgsVectorLayer,
+    data: ChannelColumns,
+    object_colour: tuple[int, int, int, int] | None,
+) -> QgsVectorLayer:
+    """Alias the channel fields and apply GA's colouring.
 
-    Counting from the end still finds the right fields when a builder renamed a
-    channel column to avoid one of its own fixed columns.
+    Builders put channel columns last, so they are found counting from the end,
+    even when a builder renamed one to avoid one of its own fixed columns.
     """
-    first = layer.fields().count() - len(aliases)
-    for offset, alias in enumerate(aliases):
+    first = layer.fields().count() - len(data.aliases)
+    for offset, alias in enumerate(data.aliases):
         if alias:
             layer.setFieldAlias(first + offset, alias)
+    shown = next(
+        (i for i, c in enumerate(data.sources) if c is not None and c.visible), None
+    )
+    field_name = None if shown is None else layer.fields().at(first + shown).name()
+    channel = None if shown is None else data.sources[shown]
+    apply_default_style(layer, field_name, channel, object_colour)
     return layer
 
 
