@@ -20,6 +20,7 @@ from qgis.core import (
 )
 
 from geoh5_qgis.layers import (
+    CHANNEL_PART_PREFIX,
     MAIN_PART,
     PART_PROPERTY,
     PATH_PROPERTY,
@@ -50,7 +51,9 @@ def restore_project(project: QgsProject) -> list[str]:
         One message per object or layer that could not be rebuilt.
     """
     targets = geoh5_layers(project)
-    results = [(*key, try_load(*key)) for key in targets]
+    results = [
+        (*key, try_load(*key, _channels(layers))) for key, layers in targets.items()
+    ]
     return _apply(targets, results)
 
 
@@ -76,7 +79,7 @@ def restore_project_in_background(
     count = f"{len(targets)} geoh5 object{'s' if len(targets) != 1 else ''}"
     return load_in_background(
         f"Reloading {count}",
-        list(targets),
+        [(*key, _channels(layers)) for key, layers in targets.items()],
         loaded,
         lambda message: _report([message], message_bar),
     )
@@ -116,7 +119,7 @@ def preprocess_source(source: str) -> str:
     path, uid, part = origin
     if not Path(path).is_file():
         return source
-    rebuilt = try_load(path, uid)
+    rebuilt = try_load(path, uid, channels=_channels_of_parts([part]))
     if isinstance(rebuilt, str):
         return source
     match = next((layer for layer in rebuilt if _part(layer) == part), None)
@@ -189,9 +192,11 @@ def _apply(targets: Targets, results: list[LoadResult]) -> list[str]:
             continue
         by_part = {_part(layer): layer for layer in rebuilt}
         by_name = {layer.name(): layer for layer in rebuilt}
+        # An object with a single layer rebuilds it whatever it was called.
+        only = rebuilt[0] if len(rebuilt) == 1 else None
         for target in targets.get((path, uid, as_polygons), []):
             # Projects saved before parts existed: fall back to the layer name.
-            source = by_part.get(_part(target)) or by_name.get(target.name())
+            source = by_part.get(_part(target)) or by_name.get(target.name()) or only
             error = (
                 transplant(target, source)
                 if source is not None
@@ -200,6 +205,21 @@ def _apply(targets: Targets, results: list[LoadResult]) -> list[str]:
             if error:
                 errors.append(error)
     return errors
+
+
+def _channels(layers: list[QgsMapLayer]) -> tuple[str, ...] | None:
+    """The Grid2D channels a project's layers of one object were built from."""
+    return _channels_of_parts([_part(layer) for layer in layers])
+
+
+def _channels_of_parts(parts: list[str]) -> tuple[str, ...] | None:
+    """Channel data UIDs named by ``channel/<uid>`` parts; None if there are none."""
+    uids = tuple(
+        part.removeprefix(CHANNEL_PART_PREFIX)
+        for part in parts
+        if part.startswith(CHANNEL_PART_PREFIX)
+    )
+    return uids or None
 
 
 def _part(layer: QgsMapLayer) -> str:

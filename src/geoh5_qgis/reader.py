@@ -365,6 +365,29 @@ def read_channels(
     return [c for c in channels if c.values.shape == (length,)]
 
 
+def raster_channels(workspace: Workspace, object_uid: str) -> list[DataInfo]:
+    """List the cell channels of a Grid2D that can become raster layers.
+
+    Reads only attributes, never values.
+
+    Args:
+        workspace: Project group from open_workspace().
+        object_uid: Object group name of a Grid2D.
+
+    Returns:
+        The numeric (Float, Integer, Referenced, Boolean) cell channels, in file
+        order.
+
+    Raises:
+        KeyError: If the object does not exist.
+    """
+    return [
+        info
+        for info in list_data(workspace, object_uid)
+        if info.association == "Cell" and info.primitive_type in NUMERIC_PRIMITIVES
+    ]
+
+
 def read_channel(workspace: Workspace, info: DataInfo) -> DataChannel:
     """Read one data channel with its units, value map and colour map.
 

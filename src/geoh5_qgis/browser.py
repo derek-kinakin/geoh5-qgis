@@ -9,6 +9,8 @@ Interaction:
 - Double-click an object, drag it onto the map, or use the context menu to add
   it to the project. Group and file context menus add every loadable object
   below them.
+- A Grid2D adds the channel GEOSCIENCE ANALYST shows. It expands to its
+  channels, each added the same ways; "Add All Channels" adds every one.
 """
 
 from pathlib import Path
@@ -28,6 +30,7 @@ from qgis.core import (
 from qgis.gui import QgsCustomDropHandler, QgsDataItemGuiProvider
 from qgis.PyQt.QtGui import QAction
 
+from geoh5_qgis.layers import ALL_CHANNELS
 from geoh5_qgis.reader import (
     CURVE,
     DRILLHOLES,
@@ -36,11 +39,13 @@ from geoh5_qgis.reader import (
     GROUP,
     POINTS,
     SURFACE,
+    DataInfo,
     ObjectInfo,
     TreeNode,
     list_objects,
     load_issue,
     open_workspace,
+    raster_channels,
     read_tree,
     tree_objects,
 )
@@ -87,6 +92,7 @@ def add_objects_in_background(
     project: QgsProject,
     message_bar=None,
     as_polygons: bool = False,
+    channels: tuple[str, ...] | None = None,
 ) -> QgsTask:
     """Load geoh5 objects in a background task, then add them to a project.
 
@@ -100,6 +106,7 @@ def add_objects_in_background(
         project: Project to add the layers to.
         message_bar: A QgsMessageBar for errors, or None.
         as_polygons: Load surfaces as triangle polygons instead of meshes.
+        channels: Grid2D channels to load (see layers.load_object_layers).
 
     Returns:
         The started task.
@@ -114,36 +121,42 @@ def add_objects_in_background(
     count = f"{len(uids)} object{'s' if len(uids) != 1 else ''}"
     return load_in_background(
         f"Loading {count} from {Path(path).name}",
-        [(str(path), uid, as_polygons) for uid in uids],
+        [(str(path), uid, as_polygons, channels) for uid in uids],
         loaded,
         lambda message: _report([f"{Path(path).name}: {message}"], message_bar),
     )
 
 
-def object_uri(path: str | Path, uid: str) -> str:
-    """URI identifying one object in a geoh5 file (``<path>|<uid>``).
+def object_uri(path: str | Path, uid: str, channel: str | None = None) -> str:
+    """URI identifying an object (``<path>|<uid>``) or one of its Grid2D channels
+    (``<path>|<uid>|<channel uid>``).
 
     Args:
         path: Path to the .geoh5 file.
         uid: Object group name.
+        channel: Data UID of a Grid2D channel, or None.
 
     Returns:
         The URI string.
     """
-    return f"{path}{URI_SEPARATOR}{uid}"
+    tail = f"{URI_SEPARATOR}{channel}" if channel else ""
+    return f"{path}{URI_SEPARATOR}{uid}{tail}"
 
 
-def parse_object_uri(uri: str) -> tuple[str, str]:
-    """Split an object URI back into file path and object UID.
+def parse_object_uri(uri: str) -> tuple[str, str, str | None]:
+    """Split an object URI back into file path, object UID and channel UID.
 
     Args:
         uri: A URI made by object_uri().
 
     Returns:
-        The file path and object UID.
+        The file path, object UID, and channel data UID (None for an object).
     """
-    path, _, uid = uri.rpartition(URI_SEPARATOR)
-    return path, uid
+    head, _, last = uri.rpartition(URI_SEPARATOR)
+    path, _, middle = head.rpartition(URI_SEPARATOR)
+    if path and middle.startswith("{"):  # UIDs are braced; paths are not
+        return path, middle, last
+    return head, last, None
 
 
 def _report(errors: list[str], message_bar) -> None:
@@ -249,7 +262,10 @@ class Geoh5ObjectItem(QgsDataItem):
         self.uid = info.uid
         self.kind = info.kind
         self.issue = issue
-        self.setState(Qgis.BrowserItemState.Populated)  # no children
+        if info.kind == GRID2D and issue is None:
+            self.setCapabilitiesV2(Qgis.BrowserItemCapability.Fertile)
+        else:
+            self.setState(Qgis.BrowserItemState.Populated)  # no children
         icon = _KIND_ICONS.get(info.kind, QgsLayerItem.iconDefault)
         self.setIcon(icon())
         reason = f"\nCannot be added: {issue}" if issue else ""
@@ -266,6 +282,48 @@ class Geoh5ObjectItem(QgsDataItem):
         uri.uri = object_uri(self.file_path, self.uid)
         return [uri]
 
+    def createChildren(self) -> list[QgsDataItem]:
+        if self.kind != GRID2D or self.issue is not None:
+            return []
+        try:
+            with open_workspace(self.file_path) as workspace:
+                infos = raster_channels(workspace, self.uid)
+        except (KeyError, RuntimeError, ValueError, FileNotFoundError) as exc:
+            return [QgsErrorItem(self, f"Cannot read channels: {exc}", self.path())]
+        return [Geoh5ChannelItem(self, info) for info in infos]
+
+
+class Geoh5ChannelItem(QgsDataItem):
+    """One data channel of a Grid2D. Adding it loads that channel's raster."""
+
+    def __init__(self, parent: Geoh5ObjectItem, info: DataInfo) -> None:
+        super().__init__(
+            Qgis.BrowserItemType.Custom,
+            parent,
+            info.name,
+            f"{parent.path()}/{info.uid}",
+            PROVIDER_KEY,
+        )
+        self.file_path = parent.file_path
+        self.object_uid = parent.uid
+        self.object_name = parent.name()
+        self.channel_uid = info.uid
+        self.setState(Qgis.BrowserItemState.Populated)
+        self.setIcon(QgsLayerItem.iconRaster())
+        shown = " (shown in GEOSCIENCE ANALYST)" if info.visible else ""
+        self.setToolTip(f"{info.primitive_type} cell data{shown}\n{info.uid}")
+
+    def hasDragEnabled(self) -> bool:
+        return True
+
+    def mimeUris(self) -> list[QgsMimeDataUtils.Uri]:
+        uri = QgsMimeDataUtils.Uri()
+        uri.layerType = "custom"
+        uri.providerKey = PROVIDER_KEY
+        uri.name = f"{self.object_name}: {self.name()}"
+        uri.uri = object_uri(self.file_path, self.object_uid, self.channel_uid)
+        return [uri]
+
 
 class Geoh5DataItemGuiProvider(QgsDataItemGuiProvider):
     """Double-click and context-menu actions for geoh5 Browser items."""
@@ -274,6 +332,9 @@ class Geoh5DataItemGuiProvider(QgsDataItemGuiProvider):
         return "geoh5"
 
     def handleDoubleClick(self, item, context) -> bool:
+        if isinstance(item, Geoh5ChannelItem):
+            _add_channels([item], context)
+            return True
         if not isinstance(item, Geoh5ObjectItem):
             return False
         if item.issue:
@@ -307,6 +368,19 @@ class Geoh5DataItemGuiProvider(QgsDataItemGuiProvider):
                     lambda: _add_items(surfaces, context, as_polygons=True)
                 )
                 menu.addAction(polygons)
+            grids = [i for i in objects if i.kind == GRID2D]
+            if grids:
+                every = QAction("Add All Channels to Project", menu)
+                every.triggered.connect(
+                    lambda: _add_items(grids, context, channels=ALL_CHANNELS)
+                )
+                menu.addAction(every)
+        elif isinstance(item, Geoh5ChannelItem):
+            channels = [i for i in selectedItems if isinstance(i, Geoh5ChannelItem)]
+            plural = "s" if len(channels) > 1 else ""
+            action = QAction(f"Add Channel{plural} to Project", menu)
+            action.triggered.connect(lambda: _add_channels(channels, context))
+            menu.addAction(action)
         elif isinstance(item, Geoh5GroupItem) and item.loadable_uids():
             action = QAction("Add All Objects in Group to Project", menu)
             action.triggered.connect(lambda: _add_group(item, context))
@@ -324,21 +398,49 @@ class Geoh5DropHandler(QgsCustomDropHandler):
         return PROVIDER_KEY
 
     def handleCustomUriDrop(self, uri: QgsMimeDataUtils.Uri) -> None:
-        path, uid = parse_object_uri(uri.uri)
+        path, uid, channel = parse_object_uri(uri.uri)
         add_objects_in_background(
-            path, [uid], QgsProject.instance(), _main_message_bar()
+            path,
+            [uid],
+            QgsProject.instance(),
+            _main_message_bar(),
+            channels=(channel,) if channel else None,
         )
 
 
 def _add_items(
-    items: list[Geoh5ObjectItem], context, as_polygons: bool = False
+    items: list[Geoh5ObjectItem],
+    context,
+    as_polygons: bool = False,
+    channels: tuple[str, ...] | None = None,
 ) -> None:
     by_file: dict[str, list[str]] = {}
     for item in items:
         by_file.setdefault(item.file_path, []).append(item.uid)
     for path, uids in by_file.items():
         add_objects_in_background(
-            path, uids, QgsProject.instance(), context.messageBar(), as_polygons
+            path,
+            uids,
+            QgsProject.instance(),
+            context.messageBar(),
+            as_polygons,
+            channels,
+        )
+
+
+def _add_channels(items: list["Geoh5ChannelItem"], context) -> None:
+    """Load the given Grid2D channels, one task per grid."""
+    by_grid: dict[tuple[str, str], list[str]] = {}
+    for item in items:
+        key = (item.file_path, item.object_uid)
+        by_grid.setdefault(key, []).append(item.channel_uid)
+    for (path, uid), channels in by_grid.items():
+        add_objects_in_background(
+            path,
+            [uid],
+            QgsProject.instance(),
+            context.messageBar(),
+            channels=tuple(channels),
         )
 
 

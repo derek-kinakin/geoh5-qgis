@@ -35,6 +35,7 @@ from conftest import (
     TYPED_UNITS,
 )
 from geoh5_qgis.layers import (
+    ALL_CHANNELS,
     _finish,
     channel_columns,
     curve_layer,
@@ -139,13 +140,16 @@ def test_aliases_follow_renamed_channel_columns() -> None:
     assert layer.renderer().classAttribute() == "part_2"
 
 
-def test_referenced_grid2d_channel_becomes_a_band(channels_file: Path) -> None:
+def test_referenced_grid2d_channel_is_an_int32_raster(channels_file: Path) -> None:
     layer = load_object_layer(channels_file, uid_of(channels_file, "zones"))
     assert isinstance(layer, QgsRasterLayer)
+    assert layer.name() == "zones: zone"
     with gdal.ExceptionMgr(useExceptions=True):
         dataset = gdal.Open(layer.source())
-        assert dataset.GetRasterBand(1).GetDescription() == "zone"
-        assert set(np.unique(dataset.ReadAsArray())) == {1.0, 2.0}
+        band = dataset.GetRasterBand(1)
+        assert band.GetDescription() == "zone"
+        assert band.DataType == gdal.GDT_Int32
+        assert set(np.unique(dataset.ReadAsArray())) == {1, 2}
 
 
 def test_layer_records_its_geoh5_source(geoh5_file: Path) -> None:
@@ -239,18 +243,17 @@ def assert_raster_matches_geoh5py(path: Path, name: str, data_name: str) -> None
         grid = ws.get_entity(name)[0]
         centroids = grid.centroids.copy()
         values = grid.get_data(data_name)[0].values.copy()
-    layer = load_object_layer(path, uid_of(path, name))
+    layers = load_object_layers(path, uid_of(path, name), channels=ALL_CHANNELS)
+    layer = next(lyr for lyr in layers if lyr.name() == f"{name}: {data_name}")
     assert isinstance(layer, QgsRasterLayer)
     assert layer.isValid()
     assert all(layer.extent().contains(QgsPointXY(x, y)) for x, y, _ in centroids)
 
     with gdal.ExceptionMgr(useExceptions=True):
         dataset = gdal.Open(layer.source())
-    band = next(
-        dataset.GetRasterBand(b)
-        for b in range(1, dataset.RasterCount + 1)
-        if dataset.GetRasterBand(b).GetDescription() == data_name
-    )
+    assert dataset.RasterCount == 1
+    band = dataset.GetRasterBand(1)
+    assert band.GetDescription() == data_name
     pixels = band.ReadAsArray()
     inverse = gdal.InvGeoTransform(dataset.GetGeoTransform())
     cols_rows = [gdal.ApplyGeoTransform(inverse, x, y) for x, y, _ in centroids]
@@ -272,8 +275,9 @@ def test_dipping_grid2d_is_rejected() -> None:
     from geoh5_qgis.layers import grid2d_layer
 
     frame = Grid2DFrame((0.0, 0.0, 0.0), 1.0, 1.0, 2, 2, 0.0, -35.0, False)
+    channel = DataChannel("{x}", "v", "Cell", "Float", np.zeros(4))
     with pytest.raises(ValueError, match="dip"):
-        grid2d_layer("g", "{x}", frame, {"v": np.zeros(4)}, None)
+        grid2d_layer("g", frame, channel, None)
 
 
 def mesh_groups(layer: QgsMeshLayer) -> dict[str, tuple[int, list[float]]]:
@@ -458,3 +462,40 @@ def test_surfaces_work_with_the_elevation_profile_tool(
     # surface z is 0.5*x + y, i.e. between 0.55 and 0.95.
     assert min(heights) == pytest.approx(0.55, abs=0.05)
     assert max(heights) == pytest.approx(0.95, abs=0.05)
+
+
+def test_float_grid_channel_is_a_float32_raster(geoh5_file: Path) -> None:
+    layer = load_object_layer(geoh5_file, uid_of(geoh5_file, "grid"))
+    assert layer.name() == "grid: elev"
+    with gdal.ExceptionMgr(useExceptions=True):
+        dataset = gdal.Open(layer.source())  # keep: bands die with it
+        assert dataset.GetRasterBand(1).DataType == gdal.GDT_Float32
+
+
+def test_select_channels() -> None:
+    from geoh5_qgis.layers import select_channels
+    from geoh5_qgis.reader import DataInfo
+
+    a = DataInfo("{A}", "a", "Cell", "Float")
+    b = DataInfo("{B}", "b", "Cell", "Float", visible=True)
+    assert select_channels([a, b], None) == [b]  # the one GA shows
+    assert select_channels([a], None) == [a]  # else the first
+    assert select_channels([], None) == []
+    assert select_channels([a, b], ("{b}",)) == [b]  # UIDs ignore case
+    assert select_channels([a, b], ALL_CHANNELS) == [a, b]
+
+
+@pytest.mark.skipif(not ASSETS.exists(), reason="geoh5vista assets not available")
+def test_real_grid_loads_the_channel_ga_shows() -> None:
+    path = ASSETS / "grid2d" / "grid2d_test_a.geoh5"
+    (layer,) = load_object_layers(path, uid_of(path, "airborne data"))
+    assert layer.name() == "airborne data: Residual Magnetic"
+    assert layer.customProperty("geoh5/part").startswith("channel/{")
+    every = load_object_layers(
+        path, uid_of(path, "airborne data"), channels=ALL_CHANNELS
+    )
+    assert [lyr.name().split(": ")[1] for lyr in every] == [
+        "Residual Magnetic",
+        "Bouguer Gravity",
+        "Elevation",
+    ]

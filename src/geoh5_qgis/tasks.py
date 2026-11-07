@@ -12,8 +12,9 @@ from qgis.PyQt.QtCore import QCoreApplication
 
 from geoh5_qgis.layers import load_object_layers
 
-# What to load: (geoh5 path, object UID, surface as polygons instead of a mesh).
-LoadRequest = tuple[str, str, bool]
+# What to load: (geoh5 path, object UID, surface as polygons instead of a mesh,
+# Grid2D channel data UIDs or None; see layers.load_object_layers).
+LoadRequest = tuple[str, str, bool, tuple[str, ...] | None]
 # (path, uid, as_polygons, layers or error message) for each request.
 LoadResult = tuple[str, str, bool, list[QgsMapLayer] | str]
 
@@ -30,7 +31,7 @@ def load_in_background(
 
     Args:
         description: Task name shown in QGIS's task bar.
-        requests: (geoh5 path, object UID, as_polygons) to load.
+        requests: (geoh5 path, object UID, as_polygons, channels) to load.
         on_loaded: Called on the main thread with one LoadResult per request
             (not called if the task is cancelled).
         on_error: Called on the main thread with a message if the task fails.
@@ -57,7 +58,10 @@ def load_in_background(
 
 
 def try_load(
-    path: str | Path, uid: str, as_polygons: bool = False
+    path: str | Path,
+    uid: str,
+    as_polygons: bool = False,
+    channels: tuple[str, ...] | None = None,
 ) -> list[QgsMapLayer] | str:
     """Build an object's layers, or return a user-facing error message.
 
@@ -65,12 +69,13 @@ def try_load(
         path: Path to the .geoh5 file.
         uid: Object UID.
         as_polygons: Load a surface as triangle polygons instead of a mesh.
+        channels: Grid2D channels to load (see layers.load_object_layers).
 
     Returns:
         The layers, or an error message if the object could not be loaded.
     """
     try:
-        return load_object_layers(path, uid, as_polygons=as_polygons)
+        return load_object_layers(path, uid, as_polygons=as_polygons, channels=channels)
     except (KeyError, ValueError, RuntimeError, FileNotFoundError) as exc:
         return f"{Path(path).name} {uid}: {exc}"
 
@@ -79,10 +84,10 @@ def _load_all(task: QgsTask, requests: list[LoadRequest]) -> list[LoadResult] | 
     """Task body (worker thread)."""
     main_thread = QCoreApplication.instance().thread()
     results: list[LoadResult] = []
-    for index, (path, uid, as_polygons) in enumerate(requests, start=1):
+    for index, (path, uid, as_polygons, channels) in enumerate(requests, start=1):
         if task.isCanceled():
             return None
-        loaded = try_load(path, uid, as_polygons)
+        loaded = try_load(path, uid, as_polygons, channels)
         if not isinstance(loaded, str):
             for layer in loaded:
                 layer.moveToThread(main_thread)

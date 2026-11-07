@@ -79,6 +79,10 @@ Background research and decisions: `docs/research/geoh5-qgis-plugin-research.md`
   not /vsimem: GDAL Processing tools run as subprocesses and silently produce nothing
   from /vsimem inputs. Files are deleted on layer removal and plugin unload; folders
   untouched for 7 days are swept at start (another QGIS may be running).
+- Grid2D loads one single-band raster per channel (part `channel/<data uid>`);
+  by default only the channel GA shows. Restore and the path preprocessor must
+  request only the saved channels (`channels=`), or a many-channel grid rewrites
+  every GeoTIFF once per saved layer.
 - Saved projects: memory vector layers reopen empty and generated sources (/vsimem,
   temp files) are gone. The plugin rebuilds geoh5 layers on `readProject`
   (`restore.py`, matched by `geoh5/path`, `geoh5/uid`, `geoh5/part`), and saves

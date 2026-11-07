@@ -1,27 +1,42 @@
 """Default QGIS styles taken from GEOSCIENCE ANALYST display settings.
 
-A vector layer is coloured by the data channel GA was showing (its ``Visible``
-flag), using that channel's GA colour map:
+Layers are coloured by a data channel using that channel's GA colour map. GA's
+colour-map values are data values already spaced by its linear or equal-area
+mapping (keys for Referenced and Boolean data). Without a colour map, an
+equal-area map is made from the data over a QGIS ramp.
+
+Vector layers are coloured by the channel GA was showing (its ``Visible`` flag):
 
 - Referenced and Boolean channels: a categorised renderer, one category per key
-  present, coloured from the colour map (keys are the map's values).
-- Float and Integer channels: a graduated renderer of GRADUATED_CLASSES classes.
-  GA's colour-map values are data values already spaced by its linear or
-  equal-area mapping, so class breaks are taken at evenly spaced colour-map
-  entries. Without a colour map, an equal-area map is made from the data.
+  present, coloured from the colour map.
+- Float and Integer channels: a graduated renderer of GRADUATED_CLASSES classes
+  with breaks at evenly spaced colour-map entries.
+- No shown channel: GA's object colour, if known.
 
-With no shown channel the layer gets GA's object colour, if known. Styles apply
-only to freshly loaded layers; restoring a project keeps the saved style.
+Raster layers (one Grid2D channel each):
+
+- Referenced and Boolean channels: a paletted renderer with the same categories.
+- Float and Integer channels: a pseudocolour renderer interpolating through every
+  colour-map entry, so it matches GA's colouring and shows a continuous legend.
+
+Styles apply only to freshly loaded layers; restoring a project keeps the saved
+style.
 """
 
 import numpy as np
 from qgis.core import (
+    Qgis,
     QgsCategorizedSymbolRenderer,
+    QgsColorRampShader,
     QgsGradientColorRamp,
     QgsGradientStop,
     QgsGraduatedSymbolRenderer,
+    QgsPalettedRasterRenderer,
+    QgsRasterLayer,
+    QgsRasterShader,
     QgsRendererCategory,
     QgsRendererRange,
+    QgsSingleBandPseudoColorRenderer,
     QgsSingleSymbolRenderer,
     QgsStyle,
     QgsSymbol,
@@ -41,6 +56,8 @@ DEFAULT_RAMP = "Spectral"
 DEFAULT_MAP_STOPS = 256
 
 Colour = tuple[int, int, int, int]
+# (key, colour, label) of one category.
+Category = tuple[int | bool, Colour, str]
 
 
 def apply_default_style(
@@ -69,6 +86,45 @@ def apply_default_style(
         layer.setRenderer(renderer)
 
 
+def apply_raster_style(layer: QgsRasterLayer, channel: DataChannel) -> None:
+    """Colour a single-band raster of one channel the way GA colours it.
+
+    Args:
+        layer: A raster whose band 1 holds ``channel``'s values.
+        channel: The channel.
+    """
+    if channel.primitive_type in CATEGORY_PRIMITIVES:
+        renderer = _paletted(layer, channel)
+    elif channel.primitive_type in GRADUATED_PRIMITIVES:
+        renderer = _pseudocolor(layer, channel)
+    else:
+        renderer = None
+    if renderer is not None:
+        layer.setRenderer(renderer)
+
+
+def colour_stops(color_map: np.ndarray, values: np.ndarray) -> np.ndarray:
+    """A GA colour map's entries in value order, ready to colour ``values``.
+
+    A map whose values are all equal (GA writes some like that) keeps its
+    colours, spread evenly over the data range.
+
+    Args:
+        color_map: (n, 5) rows of value, red, green, blue, alpha.
+        values: The channel's values; NaN is ignored.
+
+    Returns:
+        (n, 5) rows sorted by value; empty if there are no finite values.
+    """
+    data = values[np.isfinite(values)]
+    if data.size == 0 or len(color_map) == 0:
+        return np.empty((0, 5))
+    stops = color_map[np.argsort(color_map[:, 0], kind="stable")].astype(np.float64)
+    if np.ptp(stops[:, 0]) == 0:
+        stops[:, 0] = np.linspace(data.min(), data.max(), len(stops))
+    return stops
+
+
 def graduated_classes(
     color_map: np.ndarray, values: np.ndarray, n_classes: int = GRADUATED_CLASSES
 ) -> list[tuple[float, float, Colour]]:
@@ -76,8 +132,7 @@ def graduated_classes(
 
     Breaks are the colour-map values at evenly spaced entries, so an equal-area
     map gives quantile-like classes as in GA. The outer classes are widened to
-    the data range (GA clamps values beyond the map to its end colours). A map
-    whose values are all equal keeps its colours, spread over the data range.
+    the data range (GA clamps values beyond the map to its end colours).
 
     Args:
         color_map: (n, 5) rows of value, red, green, blue, alpha.
@@ -87,15 +142,12 @@ def graduated_classes(
     Returns:
         (lower, upper, colour) per class, ascending; empty if no finite values.
     """
-    data = values[np.isfinite(values)]
-    if data.size == 0 or len(color_map) == 0:
+    stops = colour_stops(color_map, values)
+    if len(stops) == 0:
         return []
-    stops = color_map[np.argsort(color_map[:, 0], kind="stable")]
-    levels = stops[:, 0]
-    if np.ptp(levels) == 0:
-        levels = np.linspace(data.min(), data.max(), len(stops))
+    data = values[np.isfinite(values)]
     entries = np.round(np.linspace(0, len(stops) - 1, n_classes + 1)).astype(int)
-    breaks = levels[entries]
+    breaks = stops[entries, 0]
     breaks[0] = min(breaks[0], data.min())
     breaks[-1] = max(breaks[-1], data.max())
     classes = []
@@ -112,35 +164,55 @@ def graduated_classes(
 def _categorized(
     layer: QgsVectorLayer, field_name: str, channel: DataChannel
 ) -> QgsCategorizedSymbolRenderer | None:
+    categories = _categories(channel)
+    if not categories:
+        return None
+    return QgsCategorizedSymbolRenderer(
+        field_name,
+        [
+            QgsRendererCategory(key, _symbol(layer, colour), label)
+            for key, colour, label in categories
+        ],
+    )
+
+
+def _paletted(
+    layer: QgsRasterLayer, channel: DataChannel
+) -> QgsPalettedRasterRenderer | None:
+    categories = _categories(channel)
+    if not categories:
+        return None
+    classes = [
+        QgsPalettedRasterRenderer.Class(float(key), QColor(*colour), label)
+        for key, colour, label in categories
+    ]
+    return QgsPalettedRasterRenderer(layer.dataProvider(), 1, classes)
+
+
+def _categories(channel: DataChannel) -> list[Category]:
+    """One category per key present, coloured and named from the GA maps."""
     values = channel.values
     keys = np.unique(values if values.dtype == bool else values[values != INTEGER_NDV])
-    if keys.size == 0:
-        return None
     colours = {
         int(row[0]): _rgba(row[1:])
         for row in (channel.color_map if channel.color_map is not None else [])
     }
     names = channel.value_map or {}
-    categories = [
-        QgsRendererCategory(
+    return [
+        (
             key.item(),
-            _symbol(layer, colours.get(int(key), MISSING_COLOUR)),
+            colours.get(int(key), MISSING_COLOUR),
             names.get(int(key), str(key.item())),
         )
         for key in keys
     ]
-    return QgsCategorizedSymbolRenderer(field_name, categories)
 
 
 def _graduated(
     layer: QgsVectorLayer, field_name: str, channel: DataChannel
 ) -> QgsGraduatedSymbolRenderer | None:
-    values = channel.values.astype(np.float64)
-    if channel.values.dtype.kind in "iu":
-        values[channel.values == INTEGER_NDV] = np.nan
-    color_map = channel.color_map
-    if color_map is None or len(color_map) == 0:
-        color_map = _default_color_map(values)
+    values = _float_values(channel)
+    color_map = _color_map(channel, values)
     classes = graduated_classes(color_map, values)
     if not classes:
         return None
@@ -152,6 +224,49 @@ def _graduated(
     # "Classify" in Layer Properties then reuses GA's colours.
     renderer.setSourceColorRamp(_color_ramp(color_map))
     return renderer
+
+
+def _pseudocolor(
+    layer: QgsRasterLayer, channel: DataChannel
+) -> QgsSingleBandPseudoColorRenderer | None:
+    values = _float_values(channel)
+    color_map = _color_map(channel, values)
+    stops = colour_stops(color_map, values)
+    if len(stops) == 0:
+        return None
+    low, high = float(stops[0, 0]), float(stops[-1, 0])
+    ramp_shader = QgsColorRampShader(low, high)
+    ramp_shader.setColorRampType(Qgis.ShaderInterpolationMethod.Linear)
+    ramp_shader.setSourceColorRamp(_color_ramp(color_map))
+    ramp_shader.setColorRampItemList(
+        [
+            QgsColorRampShader.ColorRampItem(
+                float(row[0]), QColor(*_rgba(row[1:])), f"{row[0]:g}"
+            )
+            for row in stops
+        ]
+    )
+    shader = QgsRasterShader(low, high)
+    shader.setRasterShaderFunction(ramp_shader)
+    renderer = QgsSingleBandPseudoColorRenderer(layer.dataProvider(), 1, shader)
+    renderer.setClassificationMin(low)
+    renderer.setClassificationMax(high)
+    return renderer
+
+
+def _float_values(channel: DataChannel) -> np.ndarray:
+    """Numeric values as float64 with integer no-data as NaN."""
+    values = channel.values.astype(np.float64)
+    if channel.values.dtype.kind in "iu":
+        values[channel.values == INTEGER_NDV] = np.nan
+    return values
+
+
+def _color_map(channel: DataChannel, values: np.ndarray) -> np.ndarray:
+    """The channel's GA colour map, or an equal-area default."""
+    if channel.color_map is not None and len(channel.color_map):
+        return channel.color_map
+    return _default_color_map(values)
 
 
 def _default_color_map(values: np.ndarray) -> np.ndarray:

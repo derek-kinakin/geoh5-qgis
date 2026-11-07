@@ -57,7 +57,7 @@ def layer(project: QgsProject, name: str):
 def test_reopened_project_starts_empty(geoh5_copy, project, tmp_path) -> None:
     save_and_reopen(project, geoh5_copy, tmp_path)
     assert layer(project, "pts").featureCount() == 0
-    assert not layer(project, "grid").isValid()
+    assert not layer(project, "grid: elev").isValid()
     assert layer(project, "line vertices").customProperty(PART_PROPERTY) == "vertices"
 
 
@@ -74,7 +74,7 @@ def test_restore_refills_the_same_layers(geoh5_copy, project, tmp_path) -> None:
     assert layer(project, "line").featureCount() == 3
     assert layer(project, "line vertices").featureCount() == 5
     assert layer(project, "topo").isValid()  # mesh by default
-    grid = layer(project, "grid")
+    grid = layer(project, "grid: elev")
     assert grid.isValid()
     assert grid.bandCount() == 1
     mesh = layer(project, "shaded")
@@ -118,7 +118,7 @@ def test_restore_in_background(geoh5_copy, project, tmp_path) -> None:
         time.sleep(0.01)
     QCoreApplication.processEvents()
     assert layer(project, "pts").featureCount() == 4
-    assert layer(project, "grid").isValid()
+    assert layer(project, "grid: elev").isValid()
     bar.pushWarning.assert_not_called()
 
 
@@ -155,7 +155,7 @@ def test_generated_rasters_reopen_valid_without_a_bad_layer_prompt(
     sources = re.findall(rb"<datasource>(.*?)</datasource>", xml)
     assert sources and not any(tempfiles.PREFIX.encode() in s for s in sources)
     # Valid straight after reading, before any background rebuild.
-    grid = layer(project, "grid")
+    grid = layer(project, "grid: elev")
     assert grid.isValid()
     assert grid.bandCount() == 1
 
@@ -170,8 +170,8 @@ def test_missing_geoh5_leaves_raster_for_qgis_to_report(
     project.clear()
     geoh5_copy.unlink()
     project.read(qgz)
-    assert not layer(project, "grid").isValid()
-    assert layer(project, "grid").source().startswith("geoh5:")
+    assert not layer(project, "grid: elev").isValid()
+    assert layer(project, "grid: elev").source().startswith("geoh5:")
 
 
 def test_old_projects_without_parts_match_interval_layers_by_name(
@@ -207,3 +207,62 @@ def test_polygon_surfaces_are_restored_as_polygons(
     zoned = layer(project, "zoned")
     assert zoned.featureCount() == 2
     assert "z_mean" in zoned.fields().names()
+
+
+def two_channel_grid(path: Path) -> Path:
+    from geoh5py.objects import Grid2D
+
+    from conftest import GRID_KWARGS
+
+    with Geoh5pyWorkspace.create(path) as ws:
+        grid = Grid2D.create(ws, name="g2", **GRID_KWARGS)
+        grid.add_data(
+            {
+                "first": {"values": np.arange(12.0), "association": "CELL"},
+                "second": {"values": np.arange(12.0) + 100, "association": "CELL"},
+            }
+        )
+    return path
+
+
+def band_description(layer) -> str:
+    from osgeo import gdal
+
+    with gdal.ExceptionMgr(useExceptions=True):
+        dataset = gdal.Open(layer.source())  # keep: bands die with it
+        return dataset.GetRasterBand(1).GetDescription()
+
+
+def test_each_saved_grid_channel_is_rebuilt_as_itself(
+    project, tmp_path, source_hooks
+) -> None:
+    from geoh5_qgis.layers import ALL_CHANNELS
+
+    path = two_channel_grid(tmp_path / "g2.geoh5")
+    project.addMapLayers(
+        load_object_layers(path, uids(path)["g2"], channels=ALL_CHANNELS)
+    )
+    qgz = str(tmp_path / "grids.qgz")
+    project.write(qgz)
+    project.clear()
+    tempfiles.cleanup_session()
+    project.read(qgz)
+    assert restore_project(project) == []
+    for name in ("first", "second"):
+        raster = layer(project, f"g2: {name}")
+        assert raster.isValid()
+        assert band_description(raster) == name
+
+
+def test_old_single_band_grid_layer_is_restored(geoh5_copy, project, tmp_path) -> None:
+    (grid,) = load_object_layers(geoh5_copy, uids(geoh5_copy)["grid"])
+    grid.setCustomProperty(PART_PROPERTY, "main")  # as saved before channels
+    grid.setName("grid")
+    project.addMapLayer(grid)
+    qgz = str(tmp_path / "old_grid.qgz")
+    project.write(qgz)
+    project.clear()
+    tempfiles.cleanup_session()
+    project.read(qgz)
+    assert restore_project(project) == []
+    assert layer(project, "grid").isValid()

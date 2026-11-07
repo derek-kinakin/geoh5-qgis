@@ -7,6 +7,8 @@ import pytest
 from qgis.core import (
     QgsCategorizedSymbolRenderer,
     QgsGraduatedSymbolRenderer,
+    QgsPalettedRasterRenderer,
+    QgsSingleBandPseudoColorRenderer,
     QgsSingleSymbolRenderer,
 )
 
@@ -140,3 +142,35 @@ def test_real_object_without_shown_channel_gets_ga_colour() -> None:
     assert expected is not None
     assert isinstance(layer.renderer(), QgsSingleSymbolRenderer)
     assert rgba(layer.renderer().symbol()) == expected
+
+
+def test_referenced_grid_channel_is_paletted(channels_file: Path) -> None:
+    layer = load_object_layer(channels_file, uid_of(channels_file, "zones"))
+    renderer = layer.renderer()
+    assert isinstance(renderer, QgsPalettedRasterRenderer)
+    assert [(c.value, c.label) for c in renderer.classes()] == [
+        (1.0, "A"),
+        (2.0, "B"),
+    ]
+
+
+def test_float_grid_without_colour_map_gets_a_default_ramp(geoh5_file: Path) -> None:
+    layer = load_object_layer(geoh5_file, uid_of(geoh5_file, "grid"))
+    renderer = layer.renderer()
+    assert isinstance(renderer, QgsSingleBandPseudoColorRenderer)
+    assert (renderer.classificationMin(), renderer.classificationMax()) == (0.0, 11.0)
+
+
+@needs_assets
+def test_real_float_grid_interpolates_through_the_ga_colour_map() -> None:
+    path = ASSETS / "grid2d" / "grid2d_test_a.geoh5"
+    layer = load_object_layer(path, uid_of(path, "airborne data"))
+    renderer = layer.renderer()
+    assert isinstance(renderer, QgsSingleBandPseudoColorRenderer)
+    items = renderer.shader().rasterShaderFunction().colorRampItemList()
+    assert len(items) == 256  # every GA colour-map entry
+    assert renderer.classificationMin() == pytest.approx(-252.67, abs=0.01)
+    assert renderer.classificationMax() == pytest.approx(1227.81, abs=0.01)
+    # Equal-area spacing is kept: the entries are not evenly spaced.
+    gaps = np.diff([item.value for item in items])
+    assert gaps.max() > 10 * gaps.min()

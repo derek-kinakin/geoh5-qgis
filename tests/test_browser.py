@@ -11,6 +11,7 @@ from qgis.PyQt.QtCore import QCoreApplication
 
 from geoh5_qgis.browser import (
     PROVIDER_KEY,
+    Geoh5ChannelItem,
     Geoh5DataItemGuiProvider,
     Geoh5DataItemProvider,
     Geoh5DropHandler,
@@ -83,7 +84,7 @@ def test_object_item_mime_uri_round_trips(geoh5_file: Path) -> None:
     assert uri.providerKey == PROVIDER_KEY
     assert uri.layerType == "custom"
     assert uri.name == "line"
-    assert parse_object_uri(uri.uri) == (str(geoh5_file), item.uid)
+    assert parse_object_uri(uri.uri) == (str(geoh5_file), item.uid, None)
 
 
 def test_add_objects_adds_layers_and_reports_failures(
@@ -118,7 +119,7 @@ def test_drop_handler_adds_layer(geoh5_file: Path, project: QgsProject) -> None:
     handler = Geoh5DropHandler()
     assert handler.customUriProviderKey() == PROVIDER_KEY
     handler.handleCustomUriDrop(uri)
-    assert layer_names_when_loaded(project, 1) == ["grid"]
+    assert layer_names_when_loaded(project, 1) == ["grid: elev"]
 
 
 def test_add_objects_adds_every_layer_of_an_object(
@@ -236,7 +237,7 @@ def test_background_load_of_a_mesh_and_raster(
 ) -> None:
     uids = [uid_of(geoh5_file, "shaded"), uid_of(geoh5_file, "grid")]
     add_objects_in_background(geoh5_file, uids, project)
-    assert layer_names_when_loaded(project, 2) == ["grid", "shaded"]
+    assert layer_names_when_loaded(project, 2) == ["grid: elev", "shaded"]
     assert all(layer.isValid() for layer in project.mapLayers().values())
     (mesh,) = project.mapLayersByName("shaded")
     assert mesh.renderer3D() is not None  # survives the worker-thread build
@@ -270,3 +271,48 @@ def test_surfaces_offer_add_as_polygons(geoh5_file: Path, project: QgsProject) -
     (layer,) = project.mapLayersByName("topo")
     assert layer.wkbType() == QgsWkbTypes.Type.PolygonZ
     assert "z_mean" in layer.fields().names()
+
+
+def grid_channels(path: Path, grid: str) -> dict[str, Geoh5ChannelItem]:
+    return {c.name(): c for c in object_items(path)[grid].createChildren()}
+
+
+def test_grid_item_lists_its_raster_channels(channels_file: Path) -> None:
+    items = object_items(channels_file)
+    assert items["zones"].state() != Qgis.BrowserItemState.Populated  # expandable
+    assert items["typed"].state() == Qgis.BrowserItemState.Populated  # points
+    channels = grid_channels(channels_file, "zones")
+    assert list(channels) == ["zone"]
+    assert all(isinstance(c, Geoh5ChannelItem) for c in channels.values())
+
+
+def test_channel_item_mime_uri_round_trips(channels_file: Path) -> None:
+    channel = grid_channels(channels_file, "zones")["zone"]
+    (uri,) = channel.mimeUris()
+    assert uri.name == "zones: zone"
+    assert parse_object_uri(uri.uri) == (
+        str(channels_file),
+        uid_of(channels_file, "zones"),
+        channel.channel_uid,
+    )
+
+
+def test_double_click_channel_adds_its_raster(
+    channels_file: Path, project: QgsProject
+) -> None:
+    channel = grid_channels(channels_file, "zones")["zone"]
+    provider = Geoh5DataItemGuiProvider()
+    assert provider.handleDoubleClick(channel, QgsDataItemGuiContext()) is True
+    assert layer_names_when_loaded(project, 1) == ["zones: zone"]
+
+
+def test_grids_offer_add_all_channels(geoh5_file: Path, project: QgsProject) -> None:
+    items = object_items(geoh5_file)
+    actions = actions_of(menu := context_menu(items["grid"], [items["grid"]]))
+    assert "Add All Channels to Project" in actions
+    assert "Add All Channels to Project" not in actions_of(
+        context_menu(items["pts"], [items["pts"]])
+    )
+    actions["Add All Channels to Project"].trigger()
+    assert layer_names_when_loaded(project, 1) == ["grid: elev"]
+    del menu

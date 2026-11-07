@@ -44,12 +44,15 @@ from geoh5_qgis.reader import (
     POINTS,
     SURFACE,
     DataChannel,
+    DataInfo,
     Grid2DFrame,
     Workspace,
     find_object,
     is_horizontal,
     open_workspace,
+    raster_channels,
     read_cells,
+    read_channel,
     read_channels,
     read_crs,
     read_geoimage,
@@ -58,7 +61,7 @@ from geoh5_qgis.reader import (
     read_vertices,
 )
 from geoh5_qgis.sources import register_generated
-from geoh5_qgis.styles import apply_default_style
+from geoh5_qgis.styles import apply_default_style, apply_raster_style
 from geoh5_qgis.tempfiles import is_temp_file, new_path
 
 PATH_PROPERTY = "geoh5/path"
@@ -69,6 +72,10 @@ ROLE_PROPERTY = "geoh5/role"
 PART_PROPERTY = "geoh5/part"
 MAIN_PART = "main"
 POLYGONS_PART = "polygons"  # a surface loaded as triangle polygons
+# Part of a Grid2D channel raster: CHANNEL_PART_PREFIX + data UID.
+CHANNEL_PART_PREFIX = "channel/"
+# Pass as ``channels`` to load every raster channel of a Grid2D.
+ALL_CHANNELS = ("*",)
 VERTEX_ROLE = "vertices"
 VERTEX_LAYER_SUFFIX = " vertices"
 MESH_PROVIDER = "mdal"
@@ -87,13 +94,15 @@ def load_object_layers(
     object_uid: str,
     crs: str | None = None,
     as_polygons: bool = False,
+    channels: tuple[str, ...] | None = None,
 ) -> list[QgsMapLayer]:
     """Build the QGIS layers for one geoh5 object.
 
     Most objects give one layer. A curve with vertex data also gives a PointZ
     "<name> vertices" layer (custom property ``geoh5/role`` = ``"vertices"``).
     Surfaces load as meshes, or with ``as_polygons`` as one PolygonZ per
-    triangle (part ``"polygons"``).
+    triangle (part ``"polygons"``). A Grid2D gives one raster per channel,
+    named "<grid>: <channel>" (part ``"channel/<data uid>"``).
 
     Args:
         path: Path to the .geoh5 file.
@@ -101,6 +110,9 @@ def load_object_layers(
         crs: CRS to assign (e.g. ``"EPSG:26914"``). Defaults to the CRS stored in
             the object's metadata, if any.
         as_polygons: Load a surface as triangle polygons instead of a mesh.
+            Ignored for other object kinds.
+        channels: Data UIDs of the Grid2D channels to load, or ALL_CHANNELS.
+            None loads the channel GEOSCIENCE ANALYST shows (else the first).
             Ignored for other object kinds.
 
     Returns:
@@ -118,7 +130,14 @@ def load_object_layers(
             raise KeyError(f"No object {object_uid!r} in {path}")
         crs = crs or read_crs(workspace, object_uid)
         layers = _build_layers(
-            workspace, path, info.kind, info.name, object_uid, crs, as_polygons
+            workspace,
+            path,
+            info.kind,
+            info.name,
+            object_uid,
+            crs,
+            as_polygons,
+            channels,
         )
     for layer in layers:
         layer.setCustomProperty(PATH_PROPERTY, str(path))
@@ -160,6 +179,7 @@ def _build_layers(
     uid: str,
     crs: str | None,
     as_polygons: bool = False,
+    channels: tuple[str, ...] | None = None,
 ) -> list[QgsMapLayer]:
     if kind == POINTS:
         vertices = read_vertices(workspace, uid)
@@ -206,9 +226,15 @@ def _build_layers(
         return [mesh]
     if kind == GRID2D:
         frame = read_grid2d_frame(workspace, uid)
-        n_cells = frame.u_count * frame.v_count
-        bands = channel_columns(read_channels(workspace, uid, "Cell", n_cells))
-        return [grid2d_layer(name, uid, frame, _numeric(bands.columns), crs)]
+        infos = select_channels(raster_channels(workspace, uid), channels)
+        if not infos:
+            raise ValueError(f"Grid2D {name!r} has no matching numeric cell data")
+        return [
+            grid2d_layer(
+                f"{name}: {info.name}", frame, read_channel(workspace, info), crs
+            )
+            for info in infos
+        ]
     if kind == DRILLHOLES:
         return drillhole_layers(name, read_drillholes(workspace, uid), crs)
     if kind == GEOIMAGE:
@@ -523,40 +549,77 @@ def mesh_display_name(name: str) -> str:
     return name.replace(NBSP, " ")
 
 
+def select_channels(
+    infos: list[DataInfo], channels: tuple[str, ...] | None
+) -> list[DataInfo]:
+    """Pick the channels to load from a Grid2D's raster channels.
+
+    Args:
+        infos: The grid's raster channels (reader.raster_channels()).
+        channels: Data UIDs to pick, ALL_CHANNELS, or None for the channel
+            GEOSCIENCE ANALYST shows (else the first).
+
+    Returns:
+        The picked channels, in file order; empty if none match.
+    """
+    if channels == ALL_CHANNELS:
+        return list(infos)
+    if channels is None:
+        shown = next((i for i in infos if i.visible), None)
+        return [shown or infos[0]] if infos else []
+    wanted = {c.lower() for c in channels}
+    return [i for i in infos if i.uid.lower() in wanted]
+
+
+def channel_part(data_uid: str) -> str:
+    """The part of the raster layer built from one Grid2D channel.
+
+    Args:
+        data_uid: The channel's data UID.
+
+    Returns:
+        ``"channel/<data uid>"``.
+    """
+    return f"{CHANNEL_PART_PREFIX}{data_uid}"
+
+
 def grid2d_layer(
-    name: str,
-    uid: str,
-    frame: Grid2DFrame,
-    bands: dict[str, np.ndarray],
-    crs: str | None,
+    name: str, frame: Grid2DFrame, channel: DataChannel, crs: str | None
 ) -> QgsRasterLayer:
-    """Build a raster layer for a horizontal Grid2D, one band per data channel.
+    """Build a single-band raster layer for one channel of a horizontal Grid2D.
+
+    Float data is written as Float32 (NaN no-data), Integer and Referenced as
+    Int32 (INTEGER_NDV no-data) and Boolean as Byte. The layer is styled from
+    the channel's GA colour map (see styles.apply_raster_style).
 
     Args:
         name: Layer name.
-        uid: Object UID, used to name the in-memory GeoTIFF.
         frame: The grid's placement.
-        bands: Band name to cell values (U fastest, length u_count * v_count).
+        channel: A cell channel (length u_count * v_count, U fastest).
         crs: CRS string, or None to leave it unset.
 
     Returns:
-        A raster layer backed by a GeoTIFF in the session temp folder.
+        A raster layer backed by a GeoTIFF in the session temp folder, with
+        part ``"channel/<data uid>"``.
 
     Raises:
-        ValueError: If the grid is dipping/vertical or has no numeric data.
+        ValueError: If the grid is dipping/vertical or the channel has the
+            wrong number of values.
     """
     if not is_horizontal(frame):
         raise ValueError(
             f"Grid2D {name!r} has dip {frame.dip} (vertical={frame.vertical}); "
             "only horizontal grids can be shown as map rasters"
         )
-    if not bands:
-        raise ValueError(f"Grid2D {name!r} has no numeric cell data to display")
-    path = str(new_path(uid.strip("{}"), ".tif"))
-    _write_grid_tiff(path, frame, bands, crs)
+    if channel.values.shape != (frame.u_count * frame.v_count,):
+        raise ValueError(f"{name!r} does not have one value per grid cell")
+    path = str(new_path(channel.uid.strip("{}"), ".tif"))
+    _write_grid_tiff(path, frame, channel, crs)
     layer = QgsRasterLayer(path, name, "gdal")
     if crs:
         layer.setCrs(QgsCoordinateReferenceSystem(crs))
+    layer.setCustomProperty(PART_PROPERTY, channel_part(channel.uid))
+    apply_raster_style(layer, channel)
     return layer
 
 
@@ -898,30 +961,39 @@ def _python_values(values: np.ndarray) -> list:
 
 
 def _write_grid_tiff(
-    path: str, frame: Grid2DFrame, bands: dict[str, np.ndarray], crs: str | None
+    path: str, frame: Grid2DFrame, channel: DataChannel, crs: str | None
 ) -> None:
+    data_type, no_data = _GRID_BAND_TYPES.get(
+        channel.primitive_type, (gdal.GDT_Int32, INTEGER_NDV)
+    )
     with gdal.ExceptionMgr(useExceptions=True):
         driver = gdal.GetDriverByName("GTiff")
-        dataset = driver.Create(
-            path, frame.u_count, frame.v_count, len(bands), gdal.GDT_Float64
-        )
+        dataset = driver.Create(path, frame.u_count, frame.v_count, 1, data_type)
         dataset.SetGeoTransform(grid2d_geotransform(frame))
         if crs:
             srs = osr.SpatialReference()
             srs.SetFromUserInput(crs)
             dataset.SetProjection(srs.ExportToWkt())
-        for index, (band_name, values) in enumerate(bands.items(), start=1):
-            band = dataset.GetRasterBand(index)
-            band.WriteArray(_grid_rows(values, frame))
-            band.SetNoDataValue(float("nan"))
-            band.SetDescription(band_name)
+        band = dataset.GetRasterBand(1)
+        band.WriteArray(_grid_rows(channel.values, frame))
+        if no_data is not None:
+            band.SetNoDataValue(no_data)
+        band.SetDescription(channel.name)
         dataset.FlushCache()
         del dataset
 
 
+# GDAL band type and no-data value per primitive type (Integer/Referenced: else).
+_GRID_BAND_TYPES = {
+    "Float": (gdal.GDT_Float32, float("nan")),
+    "Boolean": (gdal.GDT_Byte, None),
+}
+
+
 def _grid_rows(values: np.ndarray, frame: Grid2DFrame) -> np.ndarray:
     """Reshape U-fastest cell values to raster rows, top (far-V) row first."""
-    return _as_float(values).reshape(frame.v_count, frame.u_count)[::-1]
+    rows = values.reshape(frame.v_count, frame.u_count)[::-1]
+    return rows.astype(np.uint8) if rows.dtype == bool else rows
 
 
 def _as_float(values: np.ndarray) -> np.ndarray:
