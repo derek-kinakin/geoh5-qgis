@@ -4,7 +4,7 @@ qgisMinimumVersion=4.0
 qgisMaximumVersion=4.99
 description=Browse geoh5 (GEOSCIENCE ANALYST) files and add their objects as layers.
 about=Expands .geoh5 files in the Browser panel and loads Points, Curve, Surface, Grid2D, GeoImage and drillhole group objects as layers, keeping the geoh5 file as the source of truth. Data channels keep their types, units and value maps, and layers open coloured as in GEOSCIENCE ANALYST. Reads files with GDAL, which ships with QGIS; no extra Python packages are needed.
-version=0.2.0
+version=0.3.0
 author=Derek Kinakin
 email=89031238+derek-kinakin@users.noreply.github.com
 repository=https://github.com/derek-kinakin/geoh5-qgis
@@ -12,7 +12,9 @@ tracker=https://github.com/derek-kinakin/geoh5-qgis/issues
 tags=geoh5,geoscience,analyst,mira,hdf5,3d,mining,geology
 category=Plugins
 experimental=True
-changelog=0.2.0
+changelog=0.3.0
+    - Surface meshes open on the channel GEOSCIENCE ANALYST shows, coloured through its colour map, with named categories for referenced data
+    0.2.0
     - Points, curves, drillholes and surface polygons are drawn at their true elevation in 3D views, coloured like their 2D style
     - Curves without data load as whole lines; curves with data keep segments, shaded continuously by a shown vertex channel
     - Drillhole interval data is typed like other data (keys and labels, units, GA colours)
