@@ -65,7 +65,8 @@ def is_temp_file(source: str) -> bool:
 def files_of(source: str) -> list[Path]:
     """All generated files belonging to a source (they share its name stem).
 
-    A GeoImage, for example, is an image file plus the VRT that the layer opens.
+    A GeoImage, for example, is an image file plus the VRT that the layer opens,
+    and for large images the VRT's overviews (``<stem>.vrt.ovr``).
 
     Args:
         source: A generated data source (see is_temp_file).
@@ -76,7 +77,9 @@ def files_of(source: str) -> list[Path]:
     if not is_temp_file(source):
         return []
     path = Path(source)
-    return [p for p in path.parent.glob(f"{path.stem}.*") if p.stem == path.stem]
+    # Generated stems are unique and have no dots (new_path), so this cannot
+    # match another source's files.
+    return list(path.parent.glob(f"{path.stem}.*"))
 
 
 def remove_files(paths: list[str | Path]) -> None:

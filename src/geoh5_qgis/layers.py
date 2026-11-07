@@ -83,6 +83,10 @@ MESH_PROVIDER = "mdal"
 LABEL_SUFFIX = "_label"
 MESH_3D_RENDERER = "mesh"
 NBSP = " "
+# GeoImages longer than this (pixels) without overviews get them built.
+OVERVIEW_MIN_SIZE = 2048
+# Smallest overview built (longest side, pixels).
+OVERVIEW_SMALLEST = 256
 # ISO WKB geometry type codes (Z variants).
 WKB_POINT_Z = 1001
 WKB_LINESTRING_Z = 1002
@@ -743,10 +747,55 @@ def geoimage_layer(
             vrt.SetProjection(srs.ExportToWkt())
         vrt.FlushCache()
         del vrt, source
+    build_overviews(vrt_path)
     layer = QgsRasterLayer(vrt_path, name, "gdal")
     if crs:
         layer.setCrs(QgsCoordinateReferenceSystem(crs))
     return layer
+
+
+def build_overviews(raster_path: str) -> list[int]:
+    """Give a large image overviews so QGIS draws it quickly when zoomed out.
+
+    Images whose longest side is over OVERVIEW_MIN_SIZE pixels and that have no
+    overviews of their own (JPEGs do) get an external ``<file>.ovr``. Images with
+    a colour table are reduced with nearest-neighbour sampling, others averaged.
+
+    Args:
+        raster_path: A raster file (e.g. a GeoImage's VRT).
+
+    Returns:
+        The overview reduction factors built; empty if none were needed.
+    """
+    with gdal.ExceptionMgr(useExceptions=True):
+        dataset = gdal.Open(raster_path)
+        band = dataset.GetRasterBand(1)
+        size = max(dataset.RasterXSize, dataset.RasterYSize)
+        if size <= OVERVIEW_MIN_SIZE or band.GetOverviewCount() > 0:
+            return []
+        levels = overview_levels(size)
+        resampling = "NEAREST" if band.GetColorTable() is not None else "AVERAGE"
+        with gdal.config_options({"COMPRESS_OVERVIEW": "DEFLATE"}):
+            dataset.BuildOverviews(resampling, levels)
+        del band, dataset
+    return levels
+
+
+def overview_levels(size: int) -> list[int]:
+    """Overview reduction factors (2, 4, 8...) down to OVERVIEW_SMALLEST pixels.
+
+    Args:
+        size: The image's longest side in pixels.
+
+    Returns:
+        Factors whose overview's longest side is at least OVERVIEW_SMALLEST.
+    """
+    return list(
+        itertools.takewhile(
+            lambda factor: size / factor >= OVERVIEW_SMALLEST,
+            (2**k for k in itertools.count(1)),
+        )
+    )
 
 
 def geoimage_geotransform(

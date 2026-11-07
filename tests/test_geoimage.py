@@ -8,8 +8,13 @@ from osgeo import gdal
 from qgis.core import QgsRasterLayer
 
 from conftest import IMAGE_CORNERS, IMAGE_PIXELS
+from geoh5_qgis import layers, tempfiles
 from geoh5_qgis.hdf5_blob import read_blob
-from geoh5_qgis.layers import geoimage_geotransform, load_object_layer
+from geoh5_qgis.layers import (
+    geoimage_geotransform,
+    load_object_layer,
+    overview_levels,
+)
 from geoh5_qgis.reader import (
     GEOIMAGE,
     list_objects,
@@ -89,3 +94,70 @@ def test_real_ga_geoimage() -> None:
     extent = layer.extent()
     assert extent.xMinimum() == pytest.approx(311436.27, abs=0.01)
     assert extent.yMaximum() == pytest.approx(6076690.47, abs=0.01)
+
+
+@pytest.fixture(scope="module")
+def mixed_images(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """GeoImages 'rgba' (top-left pixel transparent), 'grey' and 'wide' (600 px)."""
+    from geoh5py.objects import GeoImage
+    from geoh5py.workspace import Workspace
+    from PIL import Image
+
+    path = tmp_path_factory.mktemp("geoh5") / "mixed_images.geoh5"
+    rgba = np.zeros((3, 4, 4), np.uint8)
+    rgba[..., 0] = 200
+    rgba[..., 3] = 255
+    rgba[0, 0, 3] = 0
+    grey = (np.arange(12, dtype=np.uint8) * 20).reshape(3, 4)
+    with Workspace.create(path) as ws:
+        # geoh5py only takes RGB arrays; an RGBA image goes in through PIL.
+        GeoImage.create(
+            ws, name="rgba", image=Image.fromarray(rgba, "RGBA"), vertices=IMAGE_CORNERS
+        )
+        GeoImage.create(ws, name="grey", image=grey, vertices=IMAGE_CORNERS)
+        wide = np.tile(np.arange(600, dtype=np.uint8), (10, 1))
+        GeoImage.create(ws, name="wide", image=wide, vertices=IMAGE_CORNERS)
+    return path
+
+
+def test_transparent_pixels_stay_transparent(mixed_images: Path) -> None:
+    layer = load_object_layer(mixed_images, object_named(mixed_images, "rgba").uid)
+    assert layer.isValid()
+    assert layer.renderer().alphaBand() == 4
+    with gdal.ExceptionMgr(useExceptions=True):
+        dataset = gdal.Open(layer.source())
+        alpha = dataset.GetRasterBand(4)
+        assert alpha.GetColorInterpretation() == gdal.GCI_AlphaBand
+        assert alpha.ReadAsArray()[0, 0] == 0
+
+
+def test_greyscale_image_loads_as_one_band(mixed_images: Path) -> None:
+    layer = load_object_layer(mixed_images, object_named(mixed_images, "grey").uid)
+    assert layer.isValid()
+    assert layer.bandCount() == 1
+
+
+def test_overview_levels_stop_at_the_smallest_size() -> None:
+    assert overview_levels(3000) == [2, 4, 8]  # 3000 / 16 < 256
+    assert overview_levels(300) == []
+
+
+def test_large_image_gets_overviews_removed_with_its_files(
+    mixed_images: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(layers, "OVERVIEW_MIN_SIZE", 500)  # "wide" is 600 px
+    monkeypatch.setattr(layers, "OVERVIEW_SMALLEST", 150)
+    layer = load_object_layer(mixed_images, object_named(mixed_images, "wide").uid)
+    assert layer.isValid()
+    with gdal.ExceptionMgr(useExceptions=True):
+        dataset = gdal.Open(layer.source())
+        assert dataset.GetRasterBand(1).GetOverviewCount() == 2  # 300, 150 px
+        del dataset
+    files = tempfiles.files_of(layer.source())
+    assert any(f.name.endswith(".vrt.ovr") for f in files)  # cleaned up with it
+
+
+def test_small_image_gets_no_overviews(mixed_images: Path) -> None:
+    layer = load_object_layer(mixed_images, object_named(mixed_images, "grey").uid)
+    files = tempfiles.files_of(layer.source())
+    assert not any(f.suffix == ".ovr" for f in files)
