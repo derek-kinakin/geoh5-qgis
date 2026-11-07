@@ -306,3 +306,76 @@ def test_holes_missing_a_channel_get_null_of_the_right_type(
     assert rows[("B", 0.0)]["CNT"] == NULL
     assert rows[("B", 0.0)]["CU"] == NULL
     assert rows[("B", 0.0)]["ROCK_label"] == "y"
+
+
+@pytest.fixture(scope="module")
+def depth_sample_file(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Hole H with depth table 'mag' (MAGSUS at 10, 40, 90 m), curved surveys."""
+    from geoh5py.groups import DrillholeGroup
+    from geoh5py.objects import Drillhole
+    from geoh5py.workspace import Workspace
+
+    path = tmp_path_factory.mktemp("geoh5") / "depth_samples.geoh5"
+    with Workspace.create(path) as ws:
+        group = DrillholeGroup.create(ws, name="DHD")
+        hole = Drillhole.create(
+            ws, name="H", parent=group, collar=H1_COLLAR, surveys=H1_SURVEYS
+        )
+        hole.add_data(
+            {
+                "MAGSUS": {
+                    "values": np.array([0.1, 0.2, 0.3]),
+                    "depth": np.array([10.0, 40.0, 90.0]),
+                }
+            },
+            property_group="mag",
+        )
+    return path
+
+
+def test_depth_table_is_read(depth_sample_file: Path) -> None:
+    with open_workspace(depth_sample_file) as ws:
+        group = read_drillholes(ws, drillhole_node(depth_sample_file).uid)
+    assert group.intervals == ()
+    (table,) = group.depths
+    assert table.name == "mag"
+    np.testing.assert_allclose(table.depth, [10.0, 40.0, 90.0])
+    (channel,) = table.channels
+    np.testing.assert_allclose(channel.values, [0.1, 0.2, 0.3])
+
+
+def test_depth_samples_sit_on_the_hole_at_their_depth(depth_sample_file: Path) -> None:
+    layers = {
+        layer.name(): layer
+        for layer in load_object_layers(
+            depth_sample_file, drillhole_node(depth_sample_file).uid
+        )
+    }
+    mag = layers["DHD mag"]
+    assert mag.wkbType() == QgsWkbTypes.Type.PointZ
+    assert mag.customProperty("geoh5/part") == "depths/mag"
+    rows = sorted(mag.getFeatures(), key=lambda f: f["depth"])
+    assert [(f["hole"], f["depth"], f["MAGSUS"]) for f in rows] == [
+        ("H", 10.0, pytest.approx(0.1)),
+        ("H", 40.0, pytest.approx(0.2)),
+        ("H", 90.0, pytest.approx(0.3)),
+    ]
+    points = [r.geometry().constGet() for r in rows]
+    expected = geoh5py_positions(depth_sample_file, "H", np.r_[10.0, 40.0, 90.0])
+    np.testing.assert_allclose(
+        [[p.x(), p.y(), p.z()] for p in points], expected, atol=0.05
+    )
+
+
+@pytest.mark.skipif(not ASSETS.exists(), reason="geoh5vista assets not available")
+def test_real_ga_depth_table() -> None:
+    path = ASSETS / "drillholes" / "dh_test_b.geoh5"
+    layers = {
+        layer.name(): layer
+        for layer in load_object_layers(path, drillhole_node(path).uid)
+    }
+    # GA keeps the surveys as a "Static-Survey" depth table too.
+    survey = layers["Drillholes_descriptions Static-Survey"]
+    assert survey.featureCount() == 844
+    assert {"hole", "depth", "Azimuth", "Dip"} <= set(survey.fields().names())
+    assert survey.renderer3D() is not None

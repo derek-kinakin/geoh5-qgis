@@ -76,8 +76,10 @@ Background research and decisions: `docs/research/geoh5-qgis-plugin-research.md`
   do). Interval tables are property groups of type "Interval table"; their first two
   properties are FROM and TO. Channel records in the group's JSON carry `Visible`
   and a braceless `Type ID` into `Types/Data types`; interval channels are built
-  with `reader.make_channel` like object data. "Depth table" and "Strike & dip"
-  property groups are not loaded yet.
+  with `reader.make_channel` like object data. "Depth table" groups (first
+  property DEPTH) load as PointZ layers on the trace; GA also stores the surveys
+  as a "Static-Survey" depth table. "Strike & dip" groups only name an existing
+  Azimuth/Dip pair and are not loaded.
 - Rasters (Grid2D, GeoImage) are files in a per-session temp folder (`tempfiles.py`),
   not /vsimem: GDAL Processing tools run as subprocesses and silently produce nothing
   from /vsimem inputs. Files are deleted on layer removal and plugin unload; folders

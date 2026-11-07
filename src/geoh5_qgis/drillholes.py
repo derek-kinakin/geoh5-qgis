@@ -41,6 +41,7 @@ from geoh5_qgis.reader import (
 
 CONCATENATED_DATA = "Concatenated Data"
 INTERVAL_TABLE = "Interval table"
+DEPTH_TABLE = "Depth table"
 MAX_STEP = 10.0  # metres between desurveyed trace points
 SURVEY_SPACING = 50.0  # long survey intervals get stations this far apart
 
@@ -78,11 +79,25 @@ class IntervalTable:
 
 
 @dataclass(frozen=True)
+class DepthTable:
+    """Data sampled at single depths (one property group), across all holes.
+
+    Channels are filled as in IntervalTable.
+    """
+
+    name: str
+    hole_index: np.ndarray  # row -> index into DrillholeGroupData.holes
+    depth: np.ndarray
+    channels: tuple[DataChannel, ...]
+
+
+@dataclass(frozen=True)
 class DrillholeGroupData:
     """Everything loaded from one drillhole group."""
 
     holes: tuple[Hole, ...]
     intervals: tuple[IntervalTable, ...]
+    depths: tuple[DepthTable, ...] = ()
 
 
 def read_drillholes(workspace: Workspace, group_uid: str) -> DrillholeGroupData:
@@ -93,8 +108,9 @@ def read_drillholes(workspace: Workspace, group_uid: str) -> DrillholeGroupData:
         group_uid: The drillhole group's UID.
 
     Returns:
-        Holes (in stored order) with their paths, and one IntervalTable per
-        interval property group, its channels typed as reader.DataChannel.
+        Holes (in stored order) with their paths, one IntervalTable per
+        interval property group and one DepthTable per depth property group,
+        their channels typed as reader.DataChannel.
 
     Raises:
         KeyError: If the group does not exist or is not a drillhole group.
@@ -103,20 +119,31 @@ def read_drillholes(workspace: Workspace, group_uid: str) -> DrillholeGroupData:
     store = _open_store(group.OpenGroup(CONCATENATED_DATA))
     records = {_norm(r["ID"]): r for r in _records(store)}
     hole_ids = _hole_ids(group)
-    intervals_by_hole = {
-        uid: _hole_interval_groups(store, records, uid) for uid in hole_ids
-    }
+    tables_by_hole = {uid: _hole_tables(store, records, uid) for uid in hole_ids}
     holes = tuple(
         _read_hole(
             store,
             records.get(uid, {}),
             uid,
-            _deepest_interval(store, records, uid, intervals_by_hole[uid]),
+            _deepest_sample(store, records, uid, tables_by_hole[uid]),
         )
         for uid in hole_ids
     )
-    tables = _interval_tables(workspace, store, records, hole_ids, intervals_by_hole)
-    return DrillholeGroupData(holes, tables)
+
+    def tables(group_type: str) -> list:
+        return _property_tables(
+            workspace, store, records, hole_ids, tables_by_hole, group_type
+        )
+
+    intervals = tuple(
+        IntervalTable(name, index, keys[0], keys[1], channels)
+        for name, index, keys, channels in tables(INTERVAL_TABLE)
+    )
+    depths = tuple(
+        DepthTable(name, index, keys[0], channels)
+        for name, index, keys, channels in tables(DEPTH_TABLE)
+    )
+    return DrillholeGroupData(holes, intervals, depths)
 
 
 def minimum_curvature(
@@ -309,96 +336,107 @@ def _arc_offsets(
     )
 
 
-# --- interval tables ------------------------------------------------------------
+# --- property tables (interval and depth) ---------------------------------------
+
+# Property group type -> number of leading key properties (FROM, TO / DEPTH).
+_TABLE_KEYS = {INTERVAL_TABLE: 2, DEPTH_TABLE: 1}
 
 
-def _deepest_interval(
+def _deepest_sample(
     store: "_Store", records: dict, uid: str, groups: list[dict]
 ) -> float:
-    ends = [_table_from_to(store, records, uid, g)[1] for g in groups]
-    return max((float(e.max()) for e in ends if e.size), default=0.0)
+    """The deepest TO or DEPTH in a hole's tables (0 if none)."""
+    lasts = [_table_keys(store, records, uid, g)[-1] for g in groups]
+    finite = [k[np.isfinite(k)] for k in lasts]
+    return max((float(k.max()) for k in finite if k.size), default=0.0)
 
 
-def _hole_interval_groups(store: "_Store", records: dict, uid: str) -> list[dict]:
+def _hole_tables(store: "_Store", records: dict, uid: str) -> list[dict]:
+    """A hole's interval and depth property groups that have their key columns."""
     ids = _slice(store, "Property Group IDs", uid)
     groups = [records.get(_norm(i)) for i in (ids if ids is not None else [])]
     return [
         g
         for g in groups
         if g
-        and g.get("Property Group Type") == INTERVAL_TABLE
-        and len(g.get("Properties", [])) >= 2
+        and g.get("Property Group Type") in _TABLE_KEYS
+        and len(g.get("Properties", [])) >= _TABLE_KEYS[g["Property Group Type"]]
     ]
 
 
-def _table_from_to(
+def _table_keys(
     store: "_Store", records: dict, uid: str, group: dict
-) -> tuple[np.ndarray, np.ndarray]:
-    from_id, to_id = (_norm(p) for p in group["Properties"][:2])
-    return (
-        _float_slice(store, records, uid, from_id),
-        _float_slice(store, records, uid, to_id),
-    )
+) -> list[np.ndarray]:
+    """A hole's key columns of one table: [from, to] or [depth]."""
+    count = _TABLE_KEYS[group["Property Group Type"]]
+    return [
+        _float_slice(store, records, uid, _norm(p)) for p in group["Properties"][:count]
+    ]
 
 
-def _interval_tables(
+def _property_tables(
     workspace: Workspace,
     store: "_Store",
     records: dict,
     hole_ids: list[str],
     groups_by_hole: dict[str, list[dict]],
-) -> tuple[IntervalTable, ...]:
+    group_type: str,
+) -> list[tuple[str, np.ndarray, list[np.ndarray], tuple[DataChannel, ...]]]:
+    """Stack each table of one type across holes.
+
+    Returns:
+        Per table: name, row -> hole index, key columns (stacked), channels.
+    """
+    count = _TABLE_KEYS[group_type]
     names = list(
         dict.fromkeys(
             g.get("Group Name", "")
             for groups in groups_by_hole.values()
             for g in groups
+            if g.get("Property Group Type") == group_type
         )
     )
     tables = []
     for table_name in names:
-        rows = []  # (hole index, from, to, {channel name: stored values})
+        rows = []  # (hole index, key columns, {channel name: stored values})
         channel_records: dict[str, dict] = {}  # first record of each channel
         shown: set[str] = set()
         for index, uid in enumerate(hole_ids):
             for group in groups_by_hole[uid]:
-                if group.get("Group Name", "") != table_name:
+                if (
+                    group.get("Property Group Type") != group_type
+                    or group.get("Group Name", "") != table_name
+                ):
                     continue
-                start, end = _table_from_to(store, records, uid, group)
+                keys = _table_keys(store, records, uid, group)
                 stored = {}
-                for prop in group["Properties"][2:]:
+                for prop in group["Properties"][count:]:
                     record = records.get(_norm(prop), {})
                     name = str(record.get("Name", prop))
                     values = _stored_values(store, record, uid)
-                    if values is None or len(values) != len(start):
+                    if values is None or len(values) != len(keys[0]):
                         continue
                     stored[name] = values
                     channel_records.setdefault(name, record)
                     if record.get("Visible"):
                         shown.add(name)
-                rows.append((index, start, end, stored))
-        if rows:
-            channels = tuple(
-                _table_channel(
-                    workspace,
-                    name,
-                    record,
-                    name in shown,
-                    [(len(s), stored.get(name)) for _, s, _, stored in rows],
-                )
-                for name, record in channel_records.items()
+                rows.append((index, keys, stored))
+        if not rows:
+            continue
+        channels = tuple(
+            _table_channel(
+                workspace,
+                name,
+                record,
+                name in shown,
+                [(len(keys[0]), stored.get(name)) for _, keys, stored in rows],
             )
-            tables.append(_stack_rows(table_name, rows, channels))
-    return tuple(tables)
-
-
-def _stack_rows(
-    name: str, rows: list, channels: tuple[DataChannel, ...]
-) -> IntervalTable:
-    hole_index = np.concatenate([np.full(len(s), i) for i, s, _, _ in rows])
-    start = np.concatenate([s for _, s, _, _ in rows])
-    end = np.concatenate([e for _, _, e, _ in rows])
-    return IntervalTable(name, hole_index, start, end, channels)
+            for name, record in channel_records.items()
+        )
+        hole_index = np.concatenate([np.full(len(keys[0]), i) for i, keys, _ in rows])
+        stacked = [np.concatenate([k[j] for _, k, _ in rows]) for j in range(count)]
+        tables.append((table_name, hole_index, stacked, channels))
+    return tables
 
 
 def _table_channel(

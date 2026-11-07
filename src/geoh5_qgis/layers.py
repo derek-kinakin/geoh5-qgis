@@ -29,9 +29,11 @@ from qgis.PyQt.QtCore import QDateTime, QMetaType
 from qgis.PyQt.QtXml import QDomDocument
 
 from geoh5_qgis.drillholes import (
+    DepthTable,
     DrillholeGroupData,
     IntervalTable,
     interval_path,
+    positions_at,
     read_drillholes,
 )
 from geoh5_qgis.hdf5_blob import read_blob
@@ -782,10 +784,12 @@ def drillhole_layers(
     - "<name> traces": LineStringZ per hole along its path.
     - "<name> <table>": LineStringZ per interval of each interval table, following
       the hole between its from and to depths, with the table's channels.
+    - "<name> <table>": PointZ per sample of each depth table, on the hole at
+      its depth, with the table's channels.
 
     Args:
         name: Drillhole group name.
-        group: Holes and interval tables from drillholes.read_drillholes().
+        group: Holes and tables from drillholes.read_drillholes().
         crs: CRS string, or None to leave it unset.
 
     Returns:
@@ -812,10 +816,17 @@ def drillhole_layers(
         [_line_geometry(h.trace) for h in holes],
         {"hole": hole_names},
     )
-    layers = [collars, traces] + [
-        _interval_layer(f"{name} {table.name}", holes, table, crs)
-        for table in group.intervals
-    ]
+    layers = (
+        [collars, traces]
+        + [
+            _interval_layer(f"{name} {table.name}", holes, table, crs)
+            for table in group.intervals
+        ]
+        + [
+            _depth_layer(f"{name} {table.name}", holes, table, crs)
+            for table in group.depths
+        ]
+    )
     for layer, role in zip(layers, ["collars", "traces"], strict=False):
         layer.setCustomProperty(ROLE_PROPERTY, role)
     return layers
@@ -840,6 +851,26 @@ def _interval_layer(
     _finish(layer, data, None)  # typed fields, unit aliases, GA styling
     layer.setCustomProperty(ROLE_PROPERTY, "intervals")
     layer.setCustomProperty(PART_PROPERTY, f"intervals/{table.name}")
+    return layer
+
+
+def _depth_layer(
+    name: str, holes: tuple, table: DepthTable, crs: str | None
+) -> QgsVectorLayer:
+    xyz = np.full((len(table.depth), 3), np.nan)
+    for index in np.unique(table.hole_index):
+        rows = table.hole_index == index
+        hole = holes[index]
+        xyz[rows] = positions_at(hole.trace, hole.trace_depth, table.depth[rows])
+    fixed = {
+        "hole": np.array([holes[i].name for i in table.hole_index], dtype=object),
+        "depth": table.depth,
+    }
+    data = channel_columns(list(table.channels))
+    layer = points_layer(name, xyz, _prepend(fixed, data.columns), crs)
+    _finish(layer, data, None)
+    layer.setCustomProperty(ROLE_PROPERTY, "depths")
+    layer.setCustomProperty(PART_PROPERTY, f"depths/{table.name}")
     return layer
 
 
