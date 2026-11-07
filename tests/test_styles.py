@@ -174,3 +174,47 @@ def test_real_float_grid_interpolates_through_the_ga_colour_map() -> None:
     # Equal-area spacing is kept: the entries are not evenly spaced.
     gaps = np.diff([item.value for item in items])
     assert gaps.max() > 10 * gaps.min()
+
+
+def rule_colours(layer) -> list[tuple[str, tuple[int, int, int, int]]]:
+    """(filter, colour) of each 3D rule, reading the colour from its symbol."""
+    rules = layer.renderer3D().rootRule().children()
+    result = []
+    for rule in rules:
+        symbol = rule.symbol()
+        colour = (
+            symbol.billboardSymbol().color()
+            if hasattr(symbol, "billboardSymbol")
+            else symbol.materialSettings().ambient()
+        )
+        result.append((rule.filterExpression(), colour.getRgb()))
+    return result
+
+
+def test_vector_layers_are_drawn_at_true_z_in_3d(geoh5_file: Path) -> None:
+    from qgis.core import Qgis
+
+    for name in ("pts", "line", "bare_line"):
+        layer = load_object_layers(geoh5_file, uid_of(geoh5_file, name))[0]
+        renderer = layer.renderer3D()
+        assert renderer is not None and renderer.type() == "rulebased"
+        for rule in renderer.rootRule().children():
+            clamping = rule.symbol().altitudeClamping()
+            assert clamping == Qgis.AltitudeClamping.Absolute
+
+
+def test_3d_rules_follow_the_graduated_2d_classes(channels_file: Path) -> None:
+    layer = load_object_layer(channels_file, uid_of(channels_file, "typed"))
+    ranges = layer.renderer().ranges()
+    rules = rule_colours(layer)
+    assert len(rules) == len(ranges)
+    assert [c for _, c in rules] == [rgba(r.symbol()) for r in ranges]
+    assert all('"au" >=' in expression for expression, _ in rules)
+
+
+def test_3d_rules_skip_categories_hidden_in_2d(channels_file: Path) -> None:
+    layer = load_object_layer(channels_file, uid_of(channels_file, "flagged"))
+    # GA draws False fully transparent, so only True gets a 3D rule.
+    ((expression, colour),) = rule_colours(layer)
+    assert colour == FLAG_COLOURS[1]
+    assert "TRUE" in expression.upper()

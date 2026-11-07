@@ -61,7 +61,12 @@ from geoh5_qgis.reader import (
     read_vertices,
 )
 from geoh5_qgis.sources import register_generated
-from geoh5_qgis.styles import apply_default_style, apply_raster_style
+from geoh5_qgis.styles import (
+    apply_default_style,
+    apply_interpolated_style,
+    apply_raster_style,
+)
+from geoh5_qgis.styles3d import apply_3d_style, qgis_3d
 from geoh5_qgis.tempfiles import is_temp_file, new_path
 
 PATH_PROPERTY = "geoh5/path"
@@ -149,6 +154,8 @@ def load_object_layers(
         if layer.customProperty(PART_PROPERTY) is None:
             role = layer.customProperty(ROLE_PROPERTY)
             layer.setCustomProperty(PART_PROPERTY, role or MAIN_PART)
+        if isinstance(layer, QgsVectorLayer) and layer.renderer3D() is None:
+            apply_3d_style(layer)  # draw at true Z, not draped on the terrain
         if is_temp_file(layer.source()):
             part = str(layer.customProperty(PART_PROPERTY))
             register_generated(layer.source(), str(path), object_uid, part)
@@ -195,11 +202,22 @@ def _build_layers(
         cells = read_cells(workspace, uid)
         colour = read_object_colour(workspace, uid)
         cell_data = channel_columns(read_channels(workspace, uid, "Cell", len(cells)))
-        vertex_data = channel_columns(
-            read_channels(workspace, uid, "Vertex", len(vertices))
+        vertex_channels = read_channels(workspace, uid, "Vertex", len(vertices))
+        vertex_data = channel_columns(vertex_channels)
+        if not cell_data.columns and not vertex_data.columns:
+            lines = curve_lines_layer(name, vertices, cells, crs)
+            return [_finish(lines, cell_data, colour)]
+        ends, end_channels = vertex_end_columns(
+            vertex_channels, cells, set(cell_data.columns)
         )
-        curve = curve_layer(name, vertices, cells, cell_data.columns, crs)
-        layers = [_finish(curve, cell_data, colour)]
+        data = _concat(cell_data, ends)
+        curve = _finish(
+            curve_layer(name, vertices, cells, data.columns, crs), data, colour
+        )
+        _style_by_shown_vertex_channel(
+            curve, data, len(cell_data.aliases), end_channels
+        )
+        layers = [curve]
         if vertex_data.columns:
             vertex_layer = curve_vertex_layer(
                 name, vertices, cells, vertex_data.columns, crs
@@ -320,6 +338,60 @@ def _finish(
     return layer
 
 
+def vertex_end_columns(
+    channels: list[DataChannel], cells: np.ndarray, taken: set[str]
+) -> tuple[ChannelColumns, list[DataChannel]]:
+    """Per-segment columns of numeric vertex channels at each segment's ends.
+
+    Each Float or Integer channel gives ``<name>_start`` and ``<name>_end``
+    (values at the segment's first and second vertex), so segments can be
+    shaded along their length. The columns have no source channel, so they are
+    not picked up as a shown channel by _finish.
+
+    Args:
+        channels: Vertex channels from reader.read_channels().
+        cells: (m, 2) vertex indices of each segment.
+        taken: Column names already in use (made unique against these).
+
+    Returns:
+        The columns, and the channels they came from (two columns each, in
+        order).
+    """
+    numeric = [c for c in channels if c.primitive_type in ("Float", "Integer")]
+    taken = set(taken)
+    columns: dict[str, np.ndarray] = {}
+    aliases: list[str | None] = []
+    for channel in numeric:
+        for suffix, ends in (("_start", cells[:, 0]), ("_end", cells[:, 1])):
+            columns[_unique(f"{channel.name}{suffix}", taken)] = channel.values[ends]
+            units = f" ({channel.units})" if channel.units else ""
+            aliases.append(f"{channel.name}{suffix}{units}" if units else None)
+    return ChannelColumns(columns, tuple(aliases), (None,) * len(aliases)), numeric
+
+
+def _concat(first: ChannelColumns, second: ChannelColumns) -> ChannelColumns:
+    return ChannelColumns(
+        first.columns | second.columns,
+        first.aliases + second.aliases,
+        first.sources + second.sources,
+    )
+
+
+def _style_by_shown_vertex_channel(
+    layer: QgsVectorLayer,
+    data: ChannelColumns,
+    n_cell_columns: int,
+    end_channels: list[DataChannel],
+) -> None:
+    """Shade segments by the vertex channel GA shows, if it has end columns."""
+    shown = next((i for i, c in enumerate(end_channels) if c.visible), None)
+    if shown is None:
+        return
+    first = layer.fields().count() - len(data.aliases) + n_cell_columns + 2 * shown
+    start, end = (layer.fields().at(first + i).name() for i in (0, 1))
+    apply_interpolated_style(layer, start, end, end_channels[shown])
+
+
 def points_layer(
     name: str,
     vertices: np.ndarray,
@@ -366,6 +438,83 @@ def curve_layer(
     geometries = _wkb_geometries(WKB_LINESTRING_Z, (2,), vertices[cells])
     columns = _prepend({"part": curve_parts(cells)}, attributes)
     return _vector_layer("LineStringZ", name, crs, geometries, columns)
+
+
+def curve_lines_layer(
+    name: str, vertices: np.ndarray, cells: np.ndarray, crs: str | None
+) -> QgsVectorLayer:
+    """Build a LineStringZ memory layer with one feature per curve chain.
+
+    Used for curves without data, where splitting into segments only gets in
+    the way of selecting, measuring and profiling. See curve_chains().
+
+    Args:
+        name: Layer name.
+        vertices: (n, 3) x, y, z array.
+        cells: (m, 2) vertex indices of each segment.
+        crs: CRS string, or None to leave it unset.
+
+    Returns:
+        The memory layer, with a ``part`` column numbering connected polylines.
+    """
+    chains = curve_chains(cells)
+    parts = vertex_parts(cells, len(vertices))
+    return _vector_layer(
+        "LineStringZ",
+        name,
+        crs,
+        [_line_geometry(vertices[chain]) for chain in chains],
+        {"part": np.array([parts[chain[0]] for chain in chains], dtype=np.int64)},
+    )
+
+
+def curve_chains(cells: np.ndarray) -> list[np.ndarray]:
+    """Split a curve's segments into chains: runs of vertices joined end to end.
+
+    A chain starts and stops at an end or a junction (a vertex used by one or
+    by three or more segments) and follows the segments in between, so each
+    chain is one LineString. A closed loop of segments gives a chain that ends
+    on its first vertex. Chains start at the vertex that appears first in
+    ``cells``, so a curve stored in drawing order keeps its direction.
+
+    Args:
+        cells: (m, 2) vertex indices of each segment.
+
+    Returns:
+        One int64 array of vertex indices per chain; every segment is used once.
+    """
+    links: dict[int, list[int]] = {}
+    for index, (a, b) in enumerate(cells.tolist()):
+        links.setdefault(a, []).append(index)
+        links.setdefault(b, []).append(index)
+    used = [False] * len(cells)
+
+    def walk(vertex: int, segment: int) -> np.ndarray:
+        chain = [vertex]
+        while True:
+            used[segment] = True
+            a, b = cells[segment].tolist()
+            vertex = b if a == vertex else a
+            chain.append(vertex)
+            if len(links[vertex]) != 2:
+                break  # an end or a junction
+            segment = next((s for s in links[vertex] if not used[s]), -1)
+            if segment < 0:
+                break  # back where a loop started
+        return np.array(chain, dtype=np.int64)
+
+    order = dict.fromkeys(cells.ravel().tolist())
+    chains = [
+        walk(vertex, segment)
+        for vertex in order
+        if len(links[vertex]) != 2
+        for segment in links[vertex]
+        if not used[segment]
+    ]
+    for segment in range(len(cells)):  # what is left is closed loops
+        if not used[segment]:
+            chains.append(walk(int(cells[segment, 0]), segment))
+    return chains
 
 
 def curve_vertex_layer(
@@ -500,13 +649,10 @@ def _set_3d_height_from_dataset(layer: QgsMeshLayer, group_index: int) -> None:
     is built from XML through the 3D renderer registry. Skipped if the 3D
     module is unavailable.
     """
-    try:
-        import qgis._3d as q3d
-    except ImportError:
+    q3d = qgis_3d()
+    if q3d is None:
         return
     registry = QgsApplication.renderer3DRegistry()
-    if MESH_3D_RENDERER not in registry.renderersList():
-        q3d.Qgs3D.initialize()  # already done by the desktop app
     symbol = q3d.QgsMesh3DSymbol()
     symbol.setVerticalDatasetGroupIndex(group_index)
     symbol.setIsVerticalMagnitudeRelative(False)  # dataset value is the height

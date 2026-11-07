@@ -79,6 +79,15 @@ Background research and decisions: `docs/research/geoh5-qgis-plugin-research.md`
   not /vsimem: GDAL Processing tools run as subprocesses and silently produce nothing
   from /vsimem inputs. Files are deleted on layer removal and plugin unload; folders
   untouched for 7 days are swept at start (another QGIS may be running).
+- Vector layers without a 3D renderer are draped on the terrain in 3D views
+  (they look flat). Every vector layer gets a rule-based 3D renderer with
+  absolute clamping mirroring its 2D style (`styles3d.py`). Never call
+  `QgsPoint3DSymbol.setBillboardSymbol()`: PyQGIS 4.2 does not transfer
+  ownership, so both sides delete the marker (heap-corruption crash). Edit
+  `billboardSymbol()` in place instead.
+- Curves with no data load as whole lines (`curve_chains`, split at
+  junctions); curves with data load one feature per segment, with numeric
+  vertex channels as `<name>_start`/`<name>_end` for interpolated-line styling.
 - Grid2D loads one single-band raster per channel (part `channel/<data uid>`);
   by default only the channel GA shows. Restore and the path preprocessor must
   request only the saved channels (`channels=`), or a many-channel grid rewrites

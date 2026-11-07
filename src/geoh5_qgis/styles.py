@@ -12,6 +12,8 @@ Vector layers are coloured by the channel GA was showing (its ``Visible`` flag):
 - Float and Integer channels: a graduated renderer of GRADUATED_CLASSES classes
   with breaks at evenly spaced colour-map entries.
 - No shown channel: GA's object colour, if known.
+- Curve segments shown by a vertex channel: an interpolated line coloured from
+  each segment's start to end value, through the colour map (as GA draws it).
 
 Raster layers (one Grid2D channel each):
 
@@ -28,9 +30,14 @@ from qgis.core import (
     Qgis,
     QgsCategorizedSymbolRenderer,
     QgsColorRampShader,
+    QgsExpression,
     QgsGradientColorRamp,
     QgsGradientStop,
     QgsGraduatedSymbolRenderer,
+    QgsInterpolatedLineColor,
+    QgsInterpolatedLineSymbolLayer,
+    QgsInterpolatedLineWidth,
+    QgsLineSymbol,
     QgsPalettedRasterRenderer,
     QgsRasterLayer,
     QgsRasterShader,
@@ -45,6 +52,7 @@ from qgis.core import (
 from qgis.PyQt.QtGui import QColor
 
 from geoh5_qgis.reader import INTEGER_NDV, DataChannel
+from geoh5_qgis.styles3d import apply_3d_style, range_expression
 
 GRADUATED_CLASSES = 10
 CATEGORY_PRIMITIVES = frozenset({"Referenced", "Boolean"})
@@ -54,6 +62,8 @@ MISSING_COLOUR = (128, 128, 128, 255)
 # Ramp for numeric channels without a colour map, low values blue.
 DEFAULT_RAMP = "Spectral"
 DEFAULT_MAP_STOPS = 256
+# Stroke width (mm) of interpolated curve lines.
+INTERPOLATED_WIDTH_MM = 0.6
 
 Colour = tuple[int, int, int, int]
 # (key, colour, label) of one category.
@@ -101,6 +111,46 @@ def apply_raster_style(layer: QgsRasterLayer, channel: DataChannel) -> None:
         renderer = None
     if renderer is not None:
         layer.setRenderer(renderer)
+
+
+def apply_interpolated_style(
+    layer: QgsVectorLayer, start_field: str, end_field: str, channel: DataChannel
+) -> None:
+    """Colour line segments continuously by a vertex channel, as GA does.
+
+    Each segment is shaded from its start-vertex value to its end-vertex value
+    through the channel's colour map. In 3D, segments are coloured by class of
+    their mean value.
+
+    Args:
+        layer: A line layer with one feature per segment.
+        start_field: Field holding the channel's value at each segment's start.
+        end_field: Field holding the value at each segment's end.
+        channel: The vertex channel.
+    """
+    values = _float_values(channel)
+    color_map = _color_map(channel, values)
+    stops = colour_stops(color_map, values)
+    if len(stops) == 0:
+        return
+    line = QgsInterpolatedLineSymbolLayer()
+    start = QgsExpression.quotedColumnRef(start_field)
+    end = QgsExpression.quotedColumnRef(end_field)
+    line.setExpressionsStringForColor(start, end)
+    line.setInterpolatedColor(QgsInterpolatedLineColor(_ramp_shader(stops, color_map)))
+    width = QgsInterpolatedLineWidth()
+    width.setIsVariableWidth(False)
+    width.setFixedStrokeWidth(INTERPOLATED_WIDTH_MM)
+    line.setInterpolatedWidth(width)
+    layer.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol([line])))
+    mean = f"(({start} + {end}) / 2)"
+    apply_3d_style(
+        layer,
+        [
+            (range_expression(mean, lower, upper), QColor(*colour))
+            for lower, upper, colour in graduated_classes(color_map, values)
+        ],
+    )
 
 
 def colour_stops(color_map: np.ndarray, values: np.ndarray) -> np.ndarray:
@@ -235,10 +285,20 @@ def _pseudocolor(
     if len(stops) == 0:
         return None
     low, high = float(stops[0, 0]), float(stops[-1, 0])
-    ramp_shader = QgsColorRampShader(low, high)
-    ramp_shader.setColorRampType(Qgis.ShaderInterpolationMethod.Linear)
-    ramp_shader.setSourceColorRamp(_color_ramp(color_map))
-    ramp_shader.setColorRampItemList(
+    shader = QgsRasterShader(low, high)
+    shader.setRasterShaderFunction(_ramp_shader(stops, color_map))
+    renderer = QgsSingleBandPseudoColorRenderer(layer.dataProvider(), 1, shader)
+    renderer.setClassificationMin(low)
+    renderer.setClassificationMax(high)
+    return renderer
+
+
+def _ramp_shader(stops: np.ndarray, color_map: np.ndarray) -> QgsColorRampShader:
+    """A linear colour ramp through every colour-map entry (see colour_stops)."""
+    shader = QgsColorRampShader(float(stops[0, 0]), float(stops[-1, 0]))
+    shader.setColorRampType(Qgis.ShaderInterpolationMethod.Linear)
+    shader.setSourceColorRamp(_color_ramp(color_map))
+    shader.setColorRampItemList(
         [
             QgsColorRampShader.ColorRampItem(
                 float(row[0]), QColor(*_rgba(row[1:])), f"{row[0]:g}"
@@ -246,12 +306,7 @@ def _pseudocolor(
             for row in stops
         ]
     )
-    shader = QgsRasterShader(low, high)
-    shader.setRasterShaderFunction(ramp_shader)
-    renderer = QgsSingleBandPseudoColorRenderer(layer.dataProvider(), 1, shader)
-    renderer.setClassificationMin(low)
-    renderer.setClassificationMax(high)
-    return renderer
+    return shader
 
 
 def _float_values(channel: DataChannel) -> np.ndarray:
