@@ -304,7 +304,11 @@ def read_data_values(workspace: Workspace, data_uid: str) -> np.ndarray:
     if array.GetDataType().GetClass() == gdal.GEDTC_STRING:
         # GDAL's ReadAsArray() cannot return strings; Read() gives a list.
         return np.array(array.Read(), dtype=object)
-    values = array.ReadAsArray()
+    return _float_no_data(array.ReadAsArray())
+
+
+def _float_no_data(values: np.ndarray) -> np.ndarray:
+    """Float values as float64 with FLOAT_NDV as NaN; other values unchanged."""
     if values.dtype.kind != "f":
         return values
     values = values.astype(np.float64)
@@ -325,7 +329,10 @@ def read_value_map(workspace: Workspace, data_uid: str) -> dict[int, str] | None
     Raises:
         KeyError: If the data channel does not exist.
     """
-    data_type = _data(workspace, data_uid).OpenGroup("Type")
+    return _read_value_map(_data(workspace, data_uid).OpenGroup("Type"))
+
+
+def _read_value_map(data_type: gdal.Group) -> dict[int, str] | None:
     if "Value map" not in (data_type.GetMDArrayNames() or []):
         return None
     value_map = data_type.OpenMDArray("Value map")
@@ -403,19 +410,57 @@ def read_channel(workspace: Workspace, info: DataInfo) -> DataChannel:
     """
     data = _data(workspace, info.uid)
     data_type = data.OpenGroup("Type") if "Type" in _groups(data) else None
-    units = str(_attrs(data_type).get("Units") or "") if data_type else ""
-    referenced = info.primitive_type == "Referenced"
+    return make_channel(info, read_data_values(workspace, info.uid), data_type)
+
+
+def make_channel(
+    info: DataInfo, values: np.ndarray, data_type: gdal.Group | None
+) -> DataChannel:
+    """Build a DataChannel from stored values and the channel's data type.
+
+    Shared by object data and drillhole groups, whose values are sliced from
+    concatenated arrays.
+
+    Args:
+        info: The channel's identity, primitive type and visibility.
+        values: Values as stored (float no-data, integer no-data, text).
+        data_type: The channel's data type group, or None if unknown.
+
+    Returns:
+        The channel, with values typed as DataChannel describes.
+    """
+    hints = _attrs(data_type) if data_type is not None else {}
+    units = str(hints.get("Units") or "")
+    referenced = info.primitive_type == "Referenced" and data_type is not None
     return DataChannel(
         uid=info.uid,
         name=info.name,
         association=info.association,
         primitive_type=info.primitive_type,
-        values=_typed_values(read_data_values(workspace, info.uid), info),
+        values=_typed_values(_float_no_data(np.asarray(values)), info),
         units=units or None,
-        value_map=read_value_map(workspace, info.uid) if referenced else None,
-        color_map=_read_color_map(data_type) if data_type else None,
+        value_map=_read_value_map(data_type) if referenced else None,
+        color_map=_read_color_map(data_type) if data_type is not None else None,
         visible=info.visible,
     )
+
+
+def find_data_type(workspace: Workspace, type_uid: str) -> gdal.Group | None:
+    """Find a data type by UID in the file's ``Types/Data types`` index.
+
+    Args:
+        workspace: Project group from open_workspace().
+        type_uid: The type's UID, with or without braces, any case.
+
+    Returns:
+        The data type group, or None if it is not there.
+    """
+    types = _indexed(workspace, "Types", "Data types")
+    if types is None:
+        return None
+    wanted = str(type_uid).strip().strip("{}").lower()
+    key = next((k for k in _groups(types) if k.strip("{}").lower() == wanted), None)
+    return types.OpenGroup(key) if key else None
 
 
 def read_object_colour(

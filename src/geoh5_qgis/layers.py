@@ -833,9 +833,11 @@ def _interval_layer(
         "from": table.start,
         "to": table.end,
     }
+    data = channel_columns(list(table.channels))
     layer = _vector_layer(
-        "LineStringZ", name, crs, geometries, _prepend(fixed, table.columns)
+        "LineStringZ", name, crs, geometries, _prepend(fixed, data.columns)
     )
+    _finish(layer, data, None)  # typed fields, unit aliases, GA styling
     layer.setCustomProperty(ROLE_PROPERTY, "intervals")
     layer.setCustomProperty(PART_PROPERTY, f"intervals/{table.name}")
     return layer

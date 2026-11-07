@@ -26,13 +26,17 @@ from osgeo import gdal
 
 from geoh5_qgis.reader import (
     CONCATENATED_IDS,
-    FLOAT_NDV,
+    INTEGER_NDV,
+    DataChannel,
+    DataInfo,
     Workspace,
     _array,
     _attrs,
     _groups,
     _indexed,
     _is_drillhole_group,
+    find_data_type,
+    make_channel,
 )
 
 CONCATENATED_DATA = "Concatenated Data"
@@ -60,13 +64,17 @@ class Hole:
 
 @dataclass(frozen=True)
 class IntervalTable:
-    """From-to interval data of one property group, across all holes."""
+    """From-to interval data of one property group, across all holes.
+
+    Each channel has one value per row; rows of holes without the channel hold
+    no-data (NaN, INTEGER_NDV, NaT or None, by type; False for Boolean).
+    """
 
     name: str
     hole_index: np.ndarray  # row -> index into DrillholeGroupData.holes
     start: np.ndarray
     end: np.ndarray
-    columns: dict[str, np.ndarray]
+    channels: tuple[DataChannel, ...]
 
 
 @dataclass(frozen=True)
@@ -75,7 +83,6 @@ class DrillholeGroupData:
 
     holes: tuple[Hole, ...]
     intervals: tuple[IntervalTable, ...]
-    value_names: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 def read_drillholes(workspace: Workspace, group_uid: str) -> DrillholeGroupData:
@@ -87,7 +94,7 @@ def read_drillholes(workspace: Workspace, group_uid: str) -> DrillholeGroupData:
 
     Returns:
         Holes (in stored order) with their paths, and one IntervalTable per
-        interval property group. Referenced values are mapped to names.
+        interval property group, its channels typed as reader.DataChannel.
 
     Raises:
         KeyError: If the group does not exist or is not a drillhole group.
@@ -108,10 +115,8 @@ def read_drillholes(workspace: Workspace, group_uid: str) -> DrillholeGroupData:
         )
         for uid in hole_ids
     )
-    tables, value_names = _interval_tables(
-        workspace, store, records, hole_ids, intervals_by_hole
-    )
-    return DrillholeGroupData(holes, tables, value_names)
+    tables = _interval_tables(workspace, store, records, hole_ids, intervals_by_hole)
+    return DrillholeGroupData(holes, tables)
 
 
 def minimum_curvature(
@@ -342,7 +347,7 @@ def _interval_tables(
     records: dict,
     hole_ids: list[str],
     groups_by_hole: dict[str, list[dict]],
-) -> tuple[tuple[IntervalTable, ...], dict[str, tuple[str, ...]]]:
+) -> tuple[IntervalTable, ...]:
     names = list(
         dict.fromkeys(
             g.get("Group Name", "")
@@ -350,106 +355,110 @@ def _interval_tables(
             for g in groups
         )
     )
-    value_names: dict[str, tuple[str, ...]] = {}
     tables = []
     for table_name in names:
-        rows = []  # (hole index, from, to, {column: values})
+        rows = []  # (hole index, from, to, {channel name: stored values})
+        channel_records: dict[str, dict] = {}  # first record of each channel
+        shown: set[str] = set()
         for index, uid in enumerate(hole_ids):
             for group in groups_by_hole[uid]:
                 if group.get("Group Name", "") != table_name:
                     continue
                 start, end = _table_from_to(store, records, uid, group)
-                columns = {}
+                stored = {}
                 for prop in group["Properties"][2:]:
                     record = records.get(_norm(prop), {})
                     name = str(record.get("Name", prop))
-                    values, mapped = _channel_values(workspace, store, record, uid)
-                    if values is not None and len(values) == len(start):
-                        columns[name] = values
-                    if mapped:
-                        value_names[name] = mapped
-                rows.append((index, start, end, columns))
+                    values = _stored_values(store, record, uid)
+                    if values is None or len(values) != len(start):
+                        continue
+                    stored[name] = values
+                    channel_records.setdefault(name, record)
+                    if record.get("Visible"):
+                        shown.add(name)
+                rows.append((index, start, end, stored))
         if rows:
-            tables.append(_stack_rows(table_name, rows))
-    return tuple(tables), value_names
+            channels = tuple(
+                _table_channel(
+                    workspace,
+                    name,
+                    record,
+                    name in shown,
+                    [(len(s), stored.get(name)) for _, s, _, stored in rows],
+                )
+                for name, record in channel_records.items()
+            )
+            tables.append(_stack_rows(table_name, rows, channels))
+    return tuple(tables)
 
 
-def _stack_rows(name: str, rows: list) -> IntervalTable:
-    column_names = list(dict.fromkeys(c for *_, columns in rows for c in columns))
+def _stack_rows(
+    name: str, rows: list, channels: tuple[DataChannel, ...]
+) -> IntervalTable:
     hole_index = np.concatenate([np.full(len(s), i) for i, s, _, _ in rows])
     start = np.concatenate([s for _, s, _, _ in rows])
     end = np.concatenate([e for _, _, e, _ in rows])
-    columns = {
-        c: _stack_column([(len(s), cols.get(c)) for _, s, _, cols in rows])
-        for c in column_names
-    }
-    return IntervalTable(name, hole_index, start, end, columns)
+    return IntervalTable(name, hole_index, start, end, channels)
 
 
-def _stack_column(parts: list[tuple[int, np.ndarray | None]]) -> np.ndarray:
-    present = [p for _, p in parts if p is not None]
-    is_object = any(p.dtype == object for p in present)
-    filler = (
-        (lambda n: np.full(n, None, dtype=object))
-        if is_object
-        else (lambda n: np.full(n, np.nan))
+def _table_channel(
+    workspace: Workspace,
+    name: str,
+    record: dict,
+    visible: bool,
+    parts: list[tuple[int, np.ndarray | None]],
+) -> DataChannel:
+    """One channel of an interval table, its holes' values stacked in row order."""
+    data_type = find_data_type(workspace, record.get("Type ID", ""))
+    primitive = str(_attrs(data_type).get("Primitive type", "")) if data_type else ""
+    info = DataInfo(
+        _norm(record.get("ID", "")),
+        name,
+        str(record.get("Association", "")),
+        primitive,
+        visible,
     )
+    return make_channel(info, _stack_column(parts, primitive), data_type)
+
+
+def _stack_column(
+    parts: list[tuple[int, np.ndarray | None]], primitive: str
+) -> np.ndarray:
+    """Concatenate holes' stored values, filling holes without them with no-data.
+
+    Integers are widened to int64 so INTEGER_NDV fits even for unsigned keys.
+    """
+    present = [p for _, p in parts if p is not None]
+    kind = present[0].dtype.kind if present else "f"
+    if kind in "OSU":
+        dtype, fill = object, None
+    elif kind == "f":
+        dtype, fill = np.float64, np.nan
+    elif primitive == "Boolean":
+        dtype, fill = np.int64, 0
+    else:
+        dtype, fill = np.int64, INTEGER_NDV
     return np.concatenate(
         [
-            (p.astype(object) if is_object else p.astype(float))
-            if p is not None
-            else filler(n)
+            np.asarray(p).astype(dtype) if p is not None else np.full(n, fill, dtype)
             for n, p in parts
         ]
     )
 
 
-def _channel_values(
-    workspace: Workspace, store: "_Store", record: dict, uid: str
-) -> tuple[np.ndarray | None, tuple[str, ...]]:
-    """A hole's values of one channel; referenced keys become names."""
+def _stored_values(store: "_Store", record: dict, uid: str) -> np.ndarray | None:
+    """A hole's stored values of one channel, or None if it has none."""
     name, data_id = record.get("Name"), _norm(record.get("ID", ""))
     values = _slice(store, name, uid, data_id=data_id) if name else None
     if values is None:
-        return None, ()
-    data_type = _data_type(workspace, record.get("Type ID", ""))
-    primitive = data_type.get("primitive")
-    if primitive == "Referenced":
-        value_map = data_type.get("value_map", {})
-        return (
-            np.array([value_map.get(int(k), str(k)) for k in values], dtype=object),
-            tuple(value_map.values()),
-        )
-    if isinstance(values, list) or values.dtype.kind in "OSU":
-        return np.array(values, dtype=object), ()
-    if values.dtype.kind == "f":
-        values = values.astype(float)
-        values[np.isclose(values, FLOAT_NDV, rtol=1e-6, atol=0.0)] = np.nan
-    return values, ()
+        return None
+    return np.array(values, dtype=object) if isinstance(values, list) else values
 
 
 def _float_slice(store: "_Store", records: dict, uid: str, data_id: str) -> np.ndarray:
     record = records.get(data_id, {})
     values = _slice(store, record.get("Name", ""), uid, data_id=data_id)
     return np.asarray(values if values is not None else [], dtype=float)
-
-
-def _data_type(workspace: Workspace, type_id: str) -> dict:
-    """Primitive type and value map of a data type (empty if not found)."""
-    types = _indexed(workspace, "Types", "Data types")
-    if types is None:
-        return {}
-    key = next((k for k in _groups(types) if _norm(k) == _norm(type_id)), None)
-    if key is None:
-        return {}
-    group = types.OpenGroup(key)
-    info = {"primitive": str(_attrs(group).get("Primitive type", ""))}
-    if "Value map" in (group.GetMDArrayNames() or []):
-        value_map = group.OpenMDArray("Value map")
-        keys = value_map.GetView('["Key"]').ReadAsArray()
-        names = value_map.GetView('["Value"]').Read()
-        info["value_map"] = {int(k): str(n) for k, n in zip(keys, names, strict=True)}
-    return info
 
 
 # --- concatenated storage ------------------------------------------------------

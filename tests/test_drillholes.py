@@ -7,7 +7,14 @@ import pytest
 from geoh5py.workspace import Workspace as Geoh5pyWorkspace
 from qgis.core import NULL, QgsWkbTypes
 
-from conftest import H1_AU, H1_COLLAR, H1_FROM_TO, H1_SURVEYS
+from conftest import (
+    H1_AU,
+    H1_COLLAR,
+    H1_FROM_TO,
+    H1_LITH_KEYS,
+    H1_LITH_MAP,
+    H1_SURVEYS,
+)
 from geoh5_qgis.drillholes import (
     interval_path,
     minimum_curvature,
@@ -94,8 +101,12 @@ def test_read_drillholes(drillhole_file: Path) -> None:
     assert table.name == "assay"
     assert [group.holes[i].name for i in table.hole_index] == ["H1"] * 3
     np.testing.assert_allclose(np.c_[table.start, table.end], H1_FROM_TO)
-    assert list(table.columns["LITH"]) == ["granite", "basalt", "granite"]
-    np.testing.assert_array_equal(table.columns["AU"], H1_AU)
+    channels = {c.name: c for c in table.channels}
+    lith = channels["LITH"]
+    assert lith.primitive_type == "Referenced"
+    assert lith.values.tolist() == H1_LITH_KEYS.tolist()
+    assert {k: lith.value_map[k] for k in (1, 2)} == H1_LITH_MAP
+    np.testing.assert_array_equal(channels["AU"].values, H1_AU)
 
 
 # --- layers -------------------------------------------------------------------
@@ -128,7 +139,8 @@ def test_drillhole_layers(drillhole_file: Path) -> None:
         ("H1", 50.0, 120.0),
         ("H1", 120.0, 250.0),
     ]
-    assert [f["LITH"] for f in rows] == ["granite", "basalt", "granite"]
+    assert [f["LITH"] for f in rows] == H1_LITH_KEYS.tolist()
+    assert [f["LITH_label"] for f in rows] == ["granite", "basalt", "granite"]
     assert [f["AU"] for f in rows] == [0.5, 1.5, NULL]
     # The second interval runs from 50 m to 120 m down the hole.
     line = rows[1].geometry().constGet()
@@ -158,7 +170,12 @@ def test_real_ga_drillholes_use_the_stored_trace() -> None:
     assert geology.name == "geology"
     assert len(geology.start) == 363
     assert (geology.end >= geology.start).all()
-    assert set(geology.columns["GEOLOGY"]) <= set(group.value_names["GEOLOGY"])
+    (channel,) = geology.channels
+    assert channel.name == "GEOLOGY"
+    assert channel.primitive_type == "Referenced"
+    assert channel.visible  # the channel GA shows
+    assert set(channel.values.tolist()) <= set(channel.value_map)
+    assert channel.color_map is not None
 
 
 @pytest.mark.skipif(not ASSETS.exists(), reason="geoh5vista assets not available")
@@ -204,3 +221,88 @@ def test_real_ga_text_and_category_intervals() -> None:
         fields
     )
     assert layers["Drillholes_descriptions collars"].featureCount() == 13
+
+
+@pytest.mark.skipif(not ASSETS.exists(), reason="geoh5vista assets not available")
+def test_real_ga_intervals_are_coloured_like_ga() -> None:
+    from qgis.core import QgsCategorizedSymbolRenderer
+
+    path = ASSETS / "drillholes" / "dh_test_b.geoh5"
+    layers = {
+        layer.name(): layer
+        for layer in load_object_layers(path, drillhole_node(path).uid)
+    }
+    litho = layers["Drillholes_descriptions litho"]
+    renderer = litho.renderer()
+    assert isinstance(renderer, QgsCategorizedSymbolRenderer)
+    assert renderer.classAttribute() == "Logged Lithology"
+    labels = {f["Logged Lithology_label"] for f in litho.getFeatures()}
+    assert {c.label() for c in renderer.categories()} == labels
+    assert litho.renderer3D() is not None  # drawn down the holes in 3D
+
+
+@pytest.fixture(scope="module")
+def two_hole_table(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Holes A and B share table 'assay'; only A has CU (float) and CNT (int)."""
+    from geoh5py.groups import DrillholeGroup
+    from geoh5py.objects import Drillhole
+    from geoh5py.workspace import Workspace
+
+    path = tmp_path_factory.mktemp("geoh5") / "two_holes.geoh5"
+    from_to = np.c_[[0.0, 10.0], [10.0, 20.0]]
+    surveys = np.c_[[0.0, 30.0], [0.0, 0.0], [-90.0, -90.0]]
+    with Workspace.create(path) as ws:
+        group = DrillholeGroup.create(ws, name="DH2")
+        a = Drillhole.create(
+            ws, name="A", parent=group, collar=np.r_[0.0, 0.0, 0.0], surveys=surveys
+        )
+        a.add_data(
+            {
+                "ROCK": {
+                    "values": np.array([1, 2], dtype=np.int32),
+                    "from-to": from_to,
+                    "type": "referenced",
+                    "value_map": {1: "x", 2: "y"},
+                },
+                "CU": {"values": np.array([0.5, 0.7]), "from-to": from_to},
+                "CNT": {"values": np.array([3, 4], dtype=np.int32), "from-to": from_to},
+            },
+            property_group="assay",
+        )
+        b = Drillhole.create(
+            ws, name="B", parent=group, collar=np.r_[50.0, 0.0, 0.0], surveys=surveys
+        )
+        b.add_data(
+            {
+                "ROCK": {
+                    "values": np.array([2, 1], dtype=np.int32),
+                    "from-to": from_to,
+                    "type": "referenced",
+                    "value_map": {1: "x", 2: "y"},
+                }
+            },
+            property_group="assay",
+        )
+    return path
+
+
+def test_holes_missing_a_channel_get_null_of_the_right_type(
+    two_hole_table: Path,
+) -> None:
+    from qgis.PyQt.QtCore import QMetaType
+
+    layers = {
+        layer.name(): layer
+        for layer in load_object_layers(
+            two_hole_table, drillhole_node(two_hole_table).uid
+        )
+    }
+    assay = layers["DH2 assay"]
+    types = {f.name(): f.type() for f in assay.fields()}
+    assert types["CNT"] == QMetaType.Type.LongLong  # not turned into a float
+    assert types["CU"] == QMetaType.Type.Double
+    rows = {(f["hole"], f["from"]): f for f in assay.getFeatures()}
+    assert rows[("A", 0.0)]["CNT"] == 3
+    assert rows[("B", 0.0)]["CNT"] == NULL
+    assert rows[("B", 0.0)]["CU"] == NULL
+    assert rows[("B", 0.0)]["ROCK_label"] == "y"
