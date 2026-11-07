@@ -21,6 +21,11 @@ Raster layers (one Grid2D channel each):
 - Float and Integer channels: a pseudocolour renderer interpolating through every
   colour-map entry, so it matches GA's colouring and shows a continuous legend.
 
+Mesh layers (surfaces): the shown channel's dataset becomes the active one,
+with the same linear ramp for numbers, or a discrete ramp with one colour and
+legend label per key for Referenced and Boolean data. Without a shown channel
+the mesh stays coloured by elevation.
+
 Styles apply only to freshly loaded layers; restoring a project keeps the saved
 style.
 """
@@ -38,6 +43,7 @@ from qgis.core import (
     QgsInterpolatedLineSymbolLayer,
     QgsInterpolatedLineWidth,
     QgsLineSymbol,
+    QgsMeshLayer,
     QgsPalettedRasterRenderer,
     QgsRasterLayer,
     QgsRasterShader,
@@ -151,6 +157,57 @@ def apply_interpolated_style(
             for lower, upper, colour in graduated_classes(color_map, values)
         ],
     )
+
+
+def apply_mesh_style(
+    layer: QgsMeshLayer, group_index: int, channel: DataChannel
+) -> None:
+    """Colour a mesh by one dataset group as GA colours the channel, and show it.
+
+    Args:
+        layer: The mesh layer.
+        group_index: Dataset group holding ``channel``'s values.
+        channel: The channel GA shows.
+    """
+    if channel.primitive_type in CATEGORY_PRIMITIVES:
+        shader = _category_shader(channel)
+    else:
+        values = _float_values(channel)
+        color_map = _color_map(channel, values)
+        stops = colour_stops(color_map, values)
+        shader = _ramp_shader(stops, color_map) if len(stops) else None
+    if shader is None:
+        return
+    settings = layer.rendererSettings()
+    scalar = settings.scalarSettings(group_index)
+    # Min/max first: setting it re-classifies the current shader from its
+    # source ramp, which would replace GA's entries (and crash without one).
+    scalar.setClassificationMinimumMaximum(shader.minimumValue(), shader.maximumValue())
+    scalar.setColorRampShader(shader)
+    settings.setScalarSettings(group_index, scalar)
+    settings.setActiveScalarDatasetGroup(group_index)
+    layer.setRendererSettings(settings)
+
+
+def _category_shader(channel: DataChannel) -> QgsColorRampShader | None:
+    """A discrete ramp giving each key its colour and name.
+
+    Each key's class reaches halfway to the next key, so vertex data blended
+    across a triangle still takes the nearest key's colour.
+    """
+    categories = _categories(channel)
+    if not categories:
+        return None
+    keys = [float(key) for key, _, _ in categories]
+    shader = QgsColorRampShader(keys[0] - 0.5, keys[-1] + 0.5)
+    shader.setColorRampType(Qgis.ShaderInterpolationMethod.Discrete)
+    shader.setColorRampItemList(
+        [
+            QgsColorRampShader.ColorRampItem(key + 0.5, QColor(*colour), label)
+            for key, (_, colour, label) in zip(keys, categories, strict=True)
+        ]
+    )
+    return shader
 
 
 def colour_stops(color_map: np.ndarray, values: np.ndarray) -> np.ndarray:

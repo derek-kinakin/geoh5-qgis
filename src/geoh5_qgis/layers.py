@@ -20,6 +20,7 @@ from qgis.core import (
     QgsField,
     QgsGeometry,
     QgsMapLayer,
+    QgsMeshDatasetGroupMetadata,
     QgsMeshLayer,
     QgsRasterLayer,
     QgsReadWriteContext,
@@ -66,6 +67,7 @@ from geoh5_qgis.sources import register_generated
 from geoh5_qgis.styles import (
     apply_default_style,
     apply_interpolated_style,
+    apply_mesh_style,
     apply_raster_style,
 )
 from geoh5_qgis.styles3d import apply_3d_style, qgis_3d
@@ -246,6 +248,7 @@ def _build_layers(
             _numeric(vertex_data.columns),
             _numeric(cell_data.columns),
             crs,
+            shown=_shown_column(vertex_data) or _shown_column(cell_data),
         )
         return [mesh]
     if kind == GRID2D:
@@ -601,6 +604,7 @@ def surface_mesh_layer(
     vertex_data: dict[str, np.ndarray],
     face_data: dict[str, np.ndarray],
     crs: str | None,
+    shown: tuple[str, DataChannel] | None = None,
 ) -> QgsMeshLayer:
     """Build a mesh layer for a surface with vertex data.
 
@@ -617,6 +621,9 @@ def surface_mesh_layer(
         vertex_data: Dataset name to length-n numeric array.
         face_data: Dataset name to length-m numeric array.
         crs: CRS string, or None to leave it unset.
+        shown: (column of ``vertex_data`` or ``face_data``, its channel) for the
+            channel GEOSCIENCE ANALYST shows; that dataset is made active and
+            styled from the channel's colour map. None keeps elevation.
 
     Returns:
         The mesh layer.
@@ -625,7 +632,7 @@ def surface_mesh_layer(
         RuntimeError: If QGIS cannot open the written mesh.
     """
     path = new_path(name, ".ply")
-    _write_ply(path, vertices, cells, vertex_data, face_data)
+    vertex_names, face_names = _write_ply(path, vertices, cells, vertex_data, face_data)
     layer = QgsMeshLayer(str(path), name, MESH_PROVIDER)
     if not layer.isValid():
         raise RuntimeError(f"QGIS could not open the mesh written for {name!r}")
@@ -640,8 +647,49 @@ def surface_mesh_layer(
     triangular.setEnabled(False)
     settings.setTriangularMeshSettings(triangular)
     layer.setRendererSettings(settings)
+    if shown is not None:
+        column, channel = shown
+        on_vertices = column in vertex_names
+        names = vertex_names if on_vertices else face_names
+        group = _dataset_group(layer, names[column], on_vertices)
+        if group is not None:
+            apply_mesh_style(layer, group, channel)
     _set_3d_height_from_dataset(layer, 0)  # 0 = elevation
     return layer
+
+
+def _shown_column(data: ChannelColumns) -> tuple[str, DataChannel] | None:
+    """The numeric column holding the channel GA shows, with that channel."""
+    return next(
+        (
+            (column, source)
+            for column, source in zip(data.columns, data.sources, strict=True)
+            if source is not None
+            and source.visible
+            and data.columns[column].dtype.kind in "fiub"
+        ),
+        None,
+    )
+
+
+def _dataset_group(layer: QgsMeshLayer, ply_name: str, on_vertices: bool) -> int | None:
+    """Index of the dataset group MDAL made from a PLY property."""
+    provider = layer.dataProvider()
+    wanted = (
+        QgsMeshDatasetGroupMetadata.DataType.DataOnVertices
+        if on_vertices
+        else QgsMeshDatasetGroupMetadata.DataType.DataOnFaces
+    )
+    return next(
+        (
+            index
+            for index in range(provider.datasetGroupCount())
+            if provider.datasetGroupMetadata(index).name()
+            == mesh_dataset_name(ply_name)
+            and provider.datasetGroupMetadata(index).dataType() == wanted
+        ),
+        None,
+    )
 
 
 def _set_3d_height_from_dataset(layer: QgsMeshLayer, group_index: int) -> None:
@@ -1250,19 +1298,24 @@ def _write_ply(
     cells: np.ndarray,
     vertex_data: dict[str, np.ndarray],
     face_data: dict[str, np.ndarray],
-) -> None:
+) -> tuple[dict[str, str], dict[str, str]]:
     """Write a triangle mesh with vertex/face properties as binary PLY.
 
     MDAL reads vertex properties other than x, y, z as vertex datasets and face
     properties as face datasets. Property names are whitespace-separated in
     the header, so they go through mesh_dataset_name(); channels named like the
     coordinates get a suffix so they cannot replace them.
+
+    Returns:
+        The property name each vertex and each face column was written as.
     """
     taken = {"x", "y", "z"}
+    vertex_names = {k: _unique(k, taken) for k in vertex_data}
+    face_taken: set[str] = set()
+    face_names = {k: _unique(k, face_taken) for k in face_data}
     vertex_columns = {"x": vertices[:, 0], "y": vertices[:, 1], "z": vertices[:, 2]}
-    vertex_columns |= {_unique(k, taken): _as_float(v) for k, v in vertex_data.items()}
-    face_names = set()
-    face_columns = {_unique(k, face_names): _as_float(v) for k, v in face_data.items()}
+    vertex_columns |= {vertex_names[k]: _as_float(v) for k, v in vertex_data.items()}
+    face_columns = {face_names[k]: _as_float(v) for k, v in face_data.items()}
     header = [
         "ply",
         "format binary_little_endian 1.0",
@@ -1290,3 +1343,4 @@ def _write_ply(
         file.write(("\n".join(header) + "\n").encode("utf-8"))
         file.write(vertex_records.tobytes())
         file.write(face_records.tobytes())
+    return vertex_names, face_names

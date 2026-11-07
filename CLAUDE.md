@@ -54,7 +54,11 @@ Background research and decisions: `docs/research/geoh5-qgis-plugin-research.md`
   properties become vertex/face datasets. Do not use `mesh_memory` (x,y only, no Z,
   datasets cannot be saved, whole mesh stored in the project file). PLY property names
   use non-breaking spaces for spaces (`mesh_dataset_name`). Renderer settings getters
-  return copies: set them back after editing.
+  return copies: set them back after editing. The shown channel's dataset is made
+  active and styled from GA's colour map; call
+  `setClassificationMinimumMaximum()` *before* `setColorRampShader()`, because it
+  re-classifies the current shader from its source ramp (replacing GA's entries,
+  and crashing on a shader without a source ramp).
 - TIN geometry (`TINZ`) works in memory in 4.2.3 but QGIS cannot save it to GPKG,
   FlatGeobuf, GeoJSON, Shapefile or DXF ("Feature geometry not imported"). A single
   MultiPolygonZ surface can only be coloured by elevation with a per-part data-defined

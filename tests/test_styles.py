@@ -218,3 +218,92 @@ def test_3d_rules_skip_categories_hidden_in_2d(channels_file: Path) -> None:
     ((expression, colour),) = rule_colours(layer)
     assert colour == FLAG_COLOURS[1]
     assert "TRUE" in expression.upper()
+
+
+# RGBA of domain keys 1 and 2.
+DOMAIN_COLOURS = [(200, 0, 0, 255), (0, 0, 200, 255)]
+
+
+@pytest.fixture(scope="module")
+def styled_surfaces(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Surfaces 'by_vertex' (shown float vertex channel 'mag') and 'by_face'
+    (shown referenced face channel 'domain' with a colour map), plus 'plain'."""
+    import h5py
+    from geoh5py.objects import Surface
+    from geoh5py.workspace import Workspace
+
+    from conftest import SURFACE_CELLS, SURFACE_VERTICES
+
+    path = tmp_path_factory.mktemp("geoh5") / "styled_surfaces.geoh5"
+    with Workspace.create(path) as ws:
+        kwargs = {"vertices": SURFACE_VERTICES, "cells": SURFACE_CELLS}
+        by_vertex = Surface.create(ws, name="by_vertex", **kwargs)
+        mag = by_vertex.add_data({"mag": {"values": np.arange(4.0)}})
+        by_face = Surface.create(ws, name="by_face", **kwargs)
+        domain = by_face.add_data(
+            {
+                "domain": {
+                    "type": "referenced",
+                    "values": np.array([1, 2], dtype=np.uint32),
+                    "value_map": {1: "andesite", 2: "basalt"},
+                    "association": "CELL",
+                }
+            }
+        )
+        domain.entity_type.color_map = np.rec.fromarrays(
+            [np.array([1.0, 2.0])]
+            + [np.array(c, dtype="u1") for c in zip(*DOMAIN_COLOURS, strict=True)],
+            names="Value,Red,Green,Blue,Alpha",
+        )
+        plain = Surface.create(ws, name="plain", **kwargs)
+        plain.add_data({"other": {"values": np.arange(4.0)}})
+        shown = [str(mag.uid), str(domain.uid)]
+    with h5py.File(path, "r+") as f:
+        for uid in shown:
+            f["GEOSCIENCE"]["Data"][f"{{{uid}}}"].attrs["Visible"] = np.int8(1)
+    return path
+
+
+def active_group(layer) -> tuple[str, object]:
+    """Display name and colour ramp shader of a mesh's active scalar group."""
+    from geoh5_qgis.layers import mesh_display_name
+
+    settings = layer.rendererSettings()
+    index = settings.activeScalarDatasetGroup()
+    name = layer.dataProvider().datasetGroupMetadata(index).name()
+    shader = settings.scalarSettings(index).colorRampShader()
+    return mesh_display_name(name), shader
+
+
+def test_mesh_shows_the_vertex_channel_ga_shows(styled_surfaces: Path) -> None:
+    from qgis.core import Qgis
+
+    layer = load_object_layer(styled_surfaces, uid_of(styled_surfaces, "by_vertex"))
+    name, shader = active_group(layer)
+    assert name == "mag"
+    assert shader.colorRampType() == Qgis.ShaderInterpolationMethod.Linear
+    assert (shader.minimumValue(), shader.maximumValue()) == (0.0, 3.0)
+    # The equal-area default map's entries survive (not re-classified).
+    assert len(shader.colorRampItemList()) == 256
+
+
+def test_mesh_shows_referenced_faces_by_category(styled_surfaces: Path) -> None:
+    from qgis.core import Qgis
+
+    layer = load_object_layer(styled_surfaces, uid_of(styled_surfaces, "by_face"))
+    name, shader = active_group(layer)
+    assert name == "domain"
+    assert shader.colorRampType() == Qgis.ShaderInterpolationMethod.Discrete
+    items = shader.colorRampItemList()
+    assert [(i.label, i.color.getRgb()) for i in items] == [
+        ("andesite", DOMAIN_COLOURS[0]),
+        ("basalt", DOMAIN_COLOURS[1]),
+    ]
+
+
+def test_mesh_without_shown_channel_stays_coloured_by_elevation(
+    styled_surfaces: Path,
+) -> None:
+    layer = load_object_layer(styled_surfaces, uid_of(styled_surfaces, "plain"))
+    assert layer.rendererSettings().activeScalarDatasetGroup() == 0
+    assert active_group(layer)[0] == "Bed Elevation"
