@@ -1,7 +1,8 @@
 # geoh5-qgis
 
 QGIS 4.x plugin for browsing and loading objects from geoh5 (GEOSCIENCE ANALYST) files.
-Background research and decisions: `docs/research/geoh5-qgis-plugin-research.md`.
+Background research and decisions: `docs/research/geoh5-qgis-plugin-research.md`
+(local only: git-ignored, not on GitHub).
 
 ## Key decisions
 

@@ -87,9 +87,6 @@ Tests build most of their geoh5 fixtures with geoh5py. Tests against a real
 GEOSCIENCE ANALYST file use `assets/GeoscienceANALYST_demo_data.geoh5` (see
 [assets/README.md](assets/README.md)).
 
-See `docs/research/geoh5-qgis-plugin-research.md` for background research and design
-decisions.
-
 ## License
 
 `geoh5-qgis` is distributed under the terms of the [MIT](https://spdx.org/licenses/MIT.html)

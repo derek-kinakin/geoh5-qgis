@@ -12,3 +12,6 @@ build/
 # QGIS lock/aux files
 *.qgs~
 *.aux.xml
+
+# Local research notes (kept out of the repo)
+docs/research/
