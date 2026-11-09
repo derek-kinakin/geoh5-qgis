@@ -28,6 +28,7 @@ from conftest import (
     POINT_ROCK_KEYS,
     POINT_TEXT,
     POINT_VERTICES,
+    SAMPLE_FILE,
     SHADED_VERTEX_VALUES,
     SURFACE_CELLS,
     SURFACE_VERTICES,
@@ -48,8 +49,6 @@ from geoh5_qgis.layers import (
 )
 from geoh5_qgis.reader import DataChannel, Grid2DFrame, list_objects, open_workspace
 from geoh5_qgis.tempfiles import is_temp_file
-
-ASSETS = Path(r"C:\Users\dkinakin\Dev\geoh5vista\assets")
 
 
 def uid_of(path: Path, name: str) -> str:
@@ -265,9 +264,8 @@ def test_grid2d_layer_values_land_on_cell_centres(geoh5_file: Path) -> None:
     assert_raster_matches_geoh5py(geoh5_file, "grid", "elev")
 
 
-@pytest.mark.skipif(not ASSETS.exists(), reason="geoh5vista assets not available")
 def test_real_rotated_grid2d() -> None:
-    path = ASSETS / "grid2d" / "grid2d_test_a.geoh5"
+    path = SAMPLE_FILE
     assert_raster_matches_geoh5py(path, "airborne data", "Bouguer Gravity")
 
 
@@ -485,9 +483,8 @@ def test_select_channels() -> None:
     assert select_channels([a, b], ALL_CHANNELS) == [a, b]
 
 
-@pytest.mark.skipif(not ASSETS.exists(), reason="geoh5vista assets not available")
 def test_real_grid_loads_the_channel_ga_shows() -> None:
-    path = ASSETS / "grid2d" / "grid2d_test_a.geoh5"
+    path = SAMPLE_FILE
     (layer,) = load_object_layers(path, uid_of(path, "airborne data"))
     assert layer.name() == "airborne data: Residual Magnetic"
     assert layer.customProperty("geoh5/part").startswith("channel/{")

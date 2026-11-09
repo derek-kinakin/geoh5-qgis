@@ -15,6 +15,7 @@ from conftest import (
     POINT_TEXT,
     POINT_VERTICES,
     ROCK_VALUE_MAP,
+    SAMPLE_FILE,
     SURFACE_CELLS,
     SURFACE_VERTICES,
     TYPED_COLOR_MAP,
@@ -40,8 +41,6 @@ from geoh5_qgis.reader import (
     read_vertices,
     tree_objects,
 )
-
-ASSETS = Path(r"C:\Users\dkinakin\Dev\geoh5vista\assets")
 
 
 def object_by_name(workspace, name: str):
@@ -167,10 +166,8 @@ def test_text_values_are_strings(geoh5_file: Path) -> None:
     assert list(values) == POINT_TEXT
 
 
-@pytest.mark.skipif(not ASSETS.exists(), reason="geoh5vista assets not available")
-def test_file_without_objects_group_lists_nothing() -> None:
-    # A GEOSCIENCE ANALYST drillhole file holding only groups: no /Objects at all.
-    with open_workspace(ASSETS / "drillholes" / "dh_test_a.geoh5") as ws:
+def test_file_without_objects_group_lists_nothing(objectless_file: Path) -> None:
+    with open_workspace(objectless_file) as ws:
         assert list_objects(ws) == []
         with pytest.raises(KeyError):
             read_vertices(ws, "{00000000-0000-0000-0000-000000000000}")
@@ -186,10 +183,8 @@ def test_open_missing_file_raises(tmp_path: Path) -> None:
         pass
 
 
-@pytest.mark.skipif(not ASSETS.exists(), reason="geoh5vista assets not available")
 def test_real_grid2d_origin_from_geoscience_analyst() -> None:
-    path = ASSETS / "grid2d" / "grid2d_test_a.geoh5"
-    with open_workspace(path) as ws:
+    with open_workspace(SAMPLE_FILE) as ws:
         frame = read_grid2d_frame(ws, object_by_name(ws, "airborne data").uid)
     np.testing.assert_allclose(frame.origin, (315532.25, 6065072.56, 172.0), atol=0.01)
     assert (frame.u_count, frame.v_count, frame.rotation) == (132, 356, 20.0)
@@ -223,16 +218,12 @@ def test_is_horizontal_tolerance() -> None:
     assert not is_horizontal(frame(0.0, vertical=True))
 
 
-@pytest.mark.skipif(not ASSETS.exists(), reason="geoh5vista assets not available")
-def test_real_grid_issues() -> None:
-    issues = issues_by_name(ASSETS / "grid2d" / "grid2d_examples.geoh5")
-    assert "dipping" in issues["i_grid"]
-    assert "dipping" in issues["v_grid"]
-    assert "no numeric cell data" in issues["h_grid"]
-    real = issues_by_name(ASSETS / "grid2d" / "grid2d_test_a.geoh5")
-    assert real["airborne data"] is None  # dip stored as -0.0
-    blocks = issues_by_name(ASSETS / "block_model" / "test_bm.geoh5")
-    assert all("not supported" in issue for issue in blocks.values())
+def test_ga_sample_issues() -> None:
+    issues = issues_by_name(SAMPLE_FILE)
+    assert "not supported" in issues.pop("Geology model")  # a block model
+    # Everything else loads, including the rotated "airborne data" grid, whose
+    # dip GA stores as -0.0.
+    assert set(issues.values()) == {None}
 
 
 def outline(nodes) -> list:
@@ -291,17 +282,22 @@ def test_flat_file_tree_lists_objects(geoh5_file: Path) -> None:
     assert "pts" in names
 
 
-@pytest.mark.skipif(not ASSETS.exists(), reason="geoh5vista assets not available")
 def test_real_ga_tree() -> None:
-    with open_workspace(ASSETS / "workspace" / "workspace_complex.geoh5") as ws:
+    with open_workspace(SAMPLE_FILE) as ws:
         tree = read_tree(ws)
         flat = {o.uid.lower() for o in list_objects(ws)}
-    assert [n.name for n in tree] == [
-        "FlinFlon Canada",
-        "GemPy Implicit Modelling",
-        "Tools",
+    (flinflon,) = tree
+    assert flinflon.name == "FlinFlon Canada"
+    assert [n.name for n in flinflon.children] == [
+        "Geology",
+        "Geophysics data",
+        "Surface data/interpretations",
+        "Surface Tools",
+        "DEM",
+        "Drillholes",
+        "Drillholes_descriptions",
+        "Geology model",
     ]
-    flinflon = tree[0]
     geophysics = next(n for n in flinflon.children if n.name == "Geophysics data")
     assert [(n.name, n.kind) for n in geophysics.children] == [
         ("airborne data", "Grid2D")
@@ -316,13 +312,15 @@ def test_real_ga_tree() -> None:
     ]
 
 
-@pytest.mark.skipif(not ASSETS.exists(), reason="geoh5vista assets not available")
 def test_real_drillhole_group_is_one_loadable_item() -> None:
     # Holes live in concatenated storage; the group loads as a whole.
-    with open_workspace(ASSETS / "drillholes" / "dh_test_a.geoh5") as ws:
-        assert [(n.name, n.kind, n.children) for n in read_tree(ws)] == [
-            ("Drillholes", "Drillholes", ())
-        ]
+    with open_workspace(SAMPLE_FILE) as ws:
+        (flinflon,) = read_tree(ws)
+    groups = [n for n in flinflon.children if n.kind == "Drillholes"]
+    assert [(n.name, n.children) for n in groups] == [
+        ("Drillholes", ()),
+        ("Drillholes_descriptions", ()),
+    ]
 
 
 def typed_channels(path: Path) -> dict:

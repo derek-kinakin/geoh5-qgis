@@ -16,29 +16,42 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 PLUGIN_DIR = REPO / "src" / "geoh5_qgis"
 DEFAULT_OUT_DIR = REPO / "dist"
+LICENSE_FILE = REPO / "LICENSE.txt"
 EXCLUDED_DIRS = frozenset({"__pycache__"})
 EXCLUDED_SUFFIXES = frozenset({".pyc", ".pyo"})
 
 
-def build_zip(plugin_dir: Path = PLUGIN_DIR, out_dir: Path = DEFAULT_OUT_DIR) -> Path:
+def build_zip(
+    plugin_dir: Path = PLUGIN_DIR,
+    out_dir: Path = DEFAULT_OUT_DIR,
+    license_file: Path = LICENSE_FILE,
+) -> Path:
     """Zip a plugin folder for QGIS's "Install from ZIP".
+
+    plugins.qgis.org requires a plain-text ``LICENSE`` (no extension) in the
+    plugin folder, so ``license_file`` is added there under that name.
 
     Args:
         plugin_dir: The plugin package folder (contains metadata.txt).
         out_dir: Folder to write the ZIP into (created if needed).
+        license_file: License text to ship as ``<folder>/LICENSE``.
 
     Returns:
         Path of the written ZIP, named ``<folder>-<version>.zip``.
 
     Raises:
-        FileNotFoundError: If ``plugin_dir`` has no metadata.txt.
+        FileNotFoundError: If ``plugin_dir`` has no metadata.txt or
+            ``license_file`` does not exist.
     """
     version = plugin_version(plugin_dir)
+    if not license_file.is_file():
+        raise FileNotFoundError(f"License file not found: {license_file}")
     out_dir.mkdir(parents=True, exist_ok=True)
     target = out_dir / f"{plugin_dir.name}-{version}.zip"
     with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
         for path in plugin_files(plugin_dir):
             archive.write(path, Path(plugin_dir.name) / path.relative_to(plugin_dir))
+        archive.write(license_file, Path(plugin_dir.name) / "LICENSE")
     return target
 
 

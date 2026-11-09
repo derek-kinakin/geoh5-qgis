@@ -9,6 +9,12 @@ from geoh5py.groups import ContainerGroup, DrillholeGroup
 from geoh5py.objects import Curve, Drillhole, GeoImage, Grid2D, Points, Surface
 from geoh5py.workspace import Workspace
 
+# A real GEOSCIENCE ANALYST file: the Flin Flon demo data Mira Geoscience ships
+# with the GA installer (see assets/README.md). Tests must open it read-only.
+SAMPLE_FILE = (
+    Path(__file__).resolve().parents[1] / "assets" / "GeoscienceANALYST_demo_data.geoh5"
+)
+
 CRS_METADATA = {
     "Coordinate Reference System": {
         "Current": {"Code": "EPSG:26914", "Name": "NAD83 / UTM zone 14N"}
@@ -338,4 +344,17 @@ def grid_issues_file(tmp_path_factory: pytest.TempPathFactory) -> Path:
                         }
                     }
                 )
+    return path
+
+
+@pytest.fixture
+def objectless_file(tmp_path: Path) -> Path:
+    """A file holding only groups, with no /Objects index at all (GA writes these
+    for drillhole-only projects)."""
+    path = tmp_path / "objectless.geoh5"
+    with Workspace.create(path) as ws:
+        ContainerGroup.create(ws, name="Folder")
+    with h5py.File(path, "r+") as f:
+        if "Objects" in f["GEOSCIENCE"]:
+            del f["GEOSCIENCE"]["Objects"]
     return path

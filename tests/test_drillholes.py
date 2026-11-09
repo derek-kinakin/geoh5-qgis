@@ -14,6 +14,7 @@ from conftest import (
     H1_LITH_KEYS,
     H1_LITH_MAP,
     H1_SURVEYS,
+    SAMPLE_FILE,
 )
 from geoh5_qgis.drillholes import (
     interval_path,
@@ -30,12 +31,25 @@ from geoh5_qgis.reader import (
     tree_objects,
 )
 
-ASSETS = Path(r"C:\Users\dkinakin\Dev\geoh5vista\assets")
+# The GA sample's two drillhole groups.
+GEOLOGY_HOLES = "Drillholes"  # 121 holes, a "geology" interval table
+LOGGED_HOLES = "Drillholes_descriptions"  # 13 holes, text and category intervals
 
 
-def drillhole_node(path: Path):
+def drillhole_node(path: Path, name: str | None = None):
+    """The file's drillhole group named ``name`` (default: the first one)."""
     with open_workspace(path) as ws:
-        return next(n for n in tree_objects(read_tree(ws)) if n.kind == DRILLHOLES)
+        return next(
+            n
+            for n in tree_objects(read_tree(ws))
+            if n.kind == DRILLHOLES and name in (None, n.name)
+        )
+
+
+def sample_layers(name: str) -> dict:
+    """The GA sample's drillhole group ``name`` loaded as layers, by layer name."""
+    uid = drillhole_node(SAMPLE_FILE, name).uid
+    return {layer.name(): layer for layer in load_object_layers(SAMPLE_FILE, uid)}
 
 
 def geoh5py_positions(path: Path, hole: str, depths: np.ndarray) -> np.ndarray:
@@ -153,14 +167,12 @@ def test_drillhole_layers(drillhole_file: Path) -> None:
     )
 
 
-# --- real GEOSCIENCE ANALYST files ----------------------------------------------
+# --- the GEOSCIENCE ANALYST sample file ----------------------------------------------
 
 
-@pytest.mark.skipif(not ASSETS.exists(), reason="geoh5vista assets not available")
 def test_real_ga_drillholes_use_the_stored_trace() -> None:
-    path = ASSETS / "drillholes" / "dh_test_a.geoh5"
-    with open_workspace(path) as ws:
-        group = read_drillholes(ws, drillhole_node(path).uid)
+    with open_workspace(SAMPLE_FILE) as ws:
+        group = read_drillholes(ws, drillhole_node(SAMPLE_FILE, GEOLOGY_HOLES).uid)
     assert len(group.holes) == 121
     with_trace = [h for h in group.holes if h.ga_trace]
     assert len(with_trace) == 121
@@ -178,24 +190,22 @@ def test_real_ga_drillholes_use_the_stored_trace() -> None:
     assert channel.color_map is not None
 
 
-@pytest.mark.skipif(not ASSETS.exists(), reason="geoh5vista assets not available")
 @pytest.mark.parametrize(
-    ("relative", "typical", "worst"),
-    [("dh_test_a.geoh5", 0.1, 2.0), ("dh_test_b.geoh5", 0.05, 0.05)],
+    ("name", "typical", "worst"),
+    [(GEOLOGY_HOLES, 0.1, 2.0), (LOGGED_HOLES, 0.05, 0.05)],
 )
 def test_minimum_curvature_reproduces_ga_traces(
-    relative: str, typical: float, worst: float
+    name: str, typical: float, worst: float
 ) -> None:
     """Our desurvey of GA's own surveys lands on GA's stored trace.
 
     Per hole, the largest deviation is a few cm (median). A few holes in
-    dh_test_a deviate up to ~1.7 m near the bottom or across large azimuth
+    the 121-hole group deviate up to ~1.7 m near the bottom or across large azimuth
     jumps, where GA evidently treats stations slightly differently. GA's own
     trace is always used when present; this desurvey is only the fallback.
     """
-    path = ASSETS / "drillholes" / relative
-    with open_workspace(path) as ws:
-        group = read_drillholes(ws, drillhole_node(path).uid)
+    with open_workspace(SAMPLE_FILE) as ws:
+        group = read_drillholes(ws, drillhole_node(SAMPLE_FILE, name).uid)
     deviations = []
     for hole in group.holes:
         if hole.surveys is None or len(hole.surveys) < 2:
@@ -207,13 +217,8 @@ def test_minimum_curvature_reproduces_ga_traces(
     assert max(deviations) < worst
 
 
-@pytest.mark.skipif(not ASSETS.exists(), reason="geoh5vista assets not available")
 def test_real_ga_text_and_category_intervals() -> None:
-    path = ASSETS / "drillholes" / "dh_test_b.geoh5"
-    layers = {
-        layer.name(): layer
-        for layer in load_object_layers(path, drillhole_node(path).uid)
-    }
+    layers = sample_layers(LOGGED_HOLES)
     litho = layers["Drillholes_descriptions litho"]
     assert litho.isValid()
     fields = litho.fields().names()
@@ -223,22 +228,16 @@ def test_real_ga_text_and_category_intervals() -> None:
     assert layers["Drillholes_descriptions collars"].featureCount() == 13
 
 
-@pytest.mark.skipif(not ASSETS.exists(), reason="geoh5vista assets not available")
 def test_real_ga_intervals_are_coloured_like_ga() -> None:
     from qgis.core import QgsCategorizedSymbolRenderer
 
-    path = ASSETS / "drillholes" / "dh_test_b.geoh5"
-    layers = {
-        layer.name(): layer
-        for layer in load_object_layers(path, drillhole_node(path).uid)
-    }
-    litho = layers["Drillholes_descriptions litho"]
-    renderer = litho.renderer()
+    geology = sample_layers(GEOLOGY_HOLES)["Drillholes geology"]
+    renderer = geology.renderer()
     assert isinstance(renderer, QgsCategorizedSymbolRenderer)
-    assert renderer.classAttribute() == "Logged Lithology"
-    labels = {f["Logged Lithology_label"] for f in litho.getFeatures()}
+    assert renderer.classAttribute() == "GEOLOGY"  # the channel GA shows
+    labels = {f["GEOLOGY_label"] for f in geology.getFeatures()}
     assert {c.label() for c in renderer.categories()} == labels
-    assert litho.renderer3D() is not None  # drawn down the holes in 3D
+    assert geology.renderer3D() is not None  # drawn down the holes in 3D
 
 
 @pytest.fixture(scope="module")
@@ -367,13 +366,8 @@ def test_depth_samples_sit_on_the_hole_at_their_depth(depth_sample_file: Path) -
     )
 
 
-@pytest.mark.skipif(not ASSETS.exists(), reason="geoh5vista assets not available")
 def test_real_ga_depth_table() -> None:
-    path = ASSETS / "drillholes" / "dh_test_b.geoh5"
-    layers = {
-        layer.name(): layer
-        for layer in load_object_layers(path, drillhole_node(path).uid)
-    }
+    layers = sample_layers(LOGGED_HOLES)
     # GA keeps the surveys as a "Static-Survey" depth table too.
     survey = layers["Drillholes_descriptions Static-Survey"]
     assert survey.featureCount() == 844

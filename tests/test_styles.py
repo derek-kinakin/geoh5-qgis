@@ -12,13 +12,14 @@ from qgis.core import (
     QgsSingleSymbolRenderer,
 )
 
-from conftest import FLAG_COLOURS, TYPED_COLOR_MAP
+from conftest import (
+    FLAG_COLOURS,
+    SAMPLE_FILE,
+    TYPED_COLOR_MAP,
+)
 from geoh5_qgis.layers import load_object_layer, load_object_layers
 from geoh5_qgis.reader import list_objects, open_workspace, read_object_colour
 from geoh5_qgis.styles import graduated_classes
-
-ASSETS = Path(r"C:\Users\dkinakin\Dev\geoh5vista\assets")
-needs_assets = pytest.mark.skipif(not ASSETS.is_dir(), reason="sample files missing")
 
 
 def uid_of(path: Path, name: str) -> str:
@@ -110,30 +111,26 @@ def test_layer_without_a_shown_channel_keeps_the_qgis_default(
     assert isinstance(layer.renderer(), QgsSingleSymbolRenderer)
 
 
-@needs_assets
 def test_real_referenced_channel_uses_ga_category_colours() -> None:
-    path = ASSETS / "points" / "pts_test_b.geoh5"
-    layer = load_object_layer(path, uid_of(path, "surface samples"))
+    layer = load_object_layer(SAMPLE_FILE, uid_of(SAMPLE_FILE, "observations"))
     renderer = layer.renderer()
     assert isinstance(renderer, QgsCategorizedSymbolRenderer)
-    assert renderer.classAttribute() == "LithoCode3"
-    keys = {f["LithoCode3"] for f in layer.getFeatures()}
+    assert renderer.classAttribute() == "history"  # the channel GA shows
+    keys = {f["history"] for f in layer.getFeatures()}
     assert {c.value() for c in renderer.categories()} == keys
     assert all(c.label() for c in renderer.categories())
 
 
-@needs_assets
 def test_real_object_colour() -> None:
-    path = ASSETS / "points" / "pts_test_b.geoh5"
+    path = SAMPLE_FILE
     with open_workspace(path) as ws:
         uid = next(o.uid for o in list_objects(ws) if o.name == "surface samples")
         # <Colour>4278211967</Colour> is ARGB 0xFF00557F.
         assert read_object_colour(ws, uid) == (0, 85, 127, 255)
 
 
-@needs_assets
 def test_real_object_without_shown_channel_gets_ga_colour() -> None:
-    path = ASSETS / "workspace" / "workspace_complex.geoh5"
+    path = SAMPLE_FILE
     with open_workspace(path) as ws:
         uid = next(o.uid for o in list_objects(ws) if o.name == "Mississippi")
         expected = read_object_colour(ws, uid)
@@ -161,9 +158,8 @@ def test_float_grid_without_colour_map_gets_a_default_ramp(geoh5_file: Path) -> 
     assert (renderer.classificationMin(), renderer.classificationMax()) == (0.0, 11.0)
 
 
-@needs_assets
 def test_real_float_grid_interpolates_through_the_ga_colour_map() -> None:
-    path = ASSETS / "grid2d" / "grid2d_test_a.geoh5"
+    path = SAMPLE_FILE
     layer = load_object_layer(path, uid_of(path, "airborne data"))
     renderer = layer.renderer()
     assert isinstance(renderer, QgsSingleBandPseudoColorRenderer)

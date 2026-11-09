@@ -7,7 +7,11 @@ import pytest
 from osgeo import gdal
 from qgis.core import QgsRasterLayer
 
-from conftest import IMAGE_CORNERS, IMAGE_PIXELS
+from conftest import (
+    IMAGE_CORNERS,
+    IMAGE_PIXELS,
+    SAMPLE_FILE,
+)
 from geoh5_qgis import layers, tempfiles
 from geoh5_qgis.hdf5_blob import read_blob
 from geoh5_qgis.layers import (
@@ -22,8 +26,6 @@ from geoh5_qgis.reader import (
     open_workspace,
     read_geoimage,
 )
-
-ASSETS = Path(r"C:\Users\dkinakin\Dev\geoh5vista\assets")
 
 
 def object_named(path: Path, name: str):
@@ -79,9 +81,8 @@ def test_tilted_geoimage_has_issue(image_file: Path) -> None:
     assert flat is None
 
 
-@pytest.mark.skipif(not ASSETS.exists(), reason="geoh5vista assets not available")
 def test_real_ga_geoimage() -> None:
-    path = ASSETS / "workspace" / "workspace_complex.geoh5"
+    path = SAMPLE_FILE
     info = object_named(path, "FlinFlon_geology")
     assert info.kind == GEOIMAGE
     with open_workspace(path) as ws:
