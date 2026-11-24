@@ -1,5 +1,6 @@
 """Shared fixtures: geoh5 files written with geoh5py (test-only dependency)."""
 
+import shutil
 from pathlib import Path
 
 import h5py
@@ -197,6 +198,26 @@ def channels_file(tmp_path_factory: pytest.TempPathFactory) -> Path:
         # The channels GA would be showing.
         data[f"{{{au_uid}}}"].attrs["Visible"] = np.int8(1)
         data[f"{{{flag_uid}}}"].attrs["Visible"] = np.int8(1)
+    return path
+
+
+TRIMMED_KEEP = 2  # values kept per channel in trimmed_file
+
+
+@pytest.fixture
+def trimmed_file(channels_file: Path, tmp_path: Path) -> Path:
+    """channels_file with every stored channel cut to its first TRIMMED_KEEP
+    values, as GA saves channels whose trailing values are no-data."""
+    path = tmp_path / "trimmed.geoh5"
+    shutil.copy(channels_file, path)
+    with h5py.File(path, "r+") as f:
+        for group in f["GEOSCIENCE"]["Data"].values():
+            if "Data" not in group:
+                continue
+            stored = group["Data"]
+            values, dtype = stored[:TRIMMED_KEEP], stored.dtype
+            del group["Data"]
+            group.create_dataset("Data", data=values, dtype=dtype)
     return path
 
 

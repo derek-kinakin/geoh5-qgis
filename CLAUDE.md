@@ -41,6 +41,9 @@ Background research and decisions: `docs/research/geoh5-qgis-plugin-research.md`
 - Compounds mixing numbers and strings (`Value map`) must be read per field with
   `GetView('["Key"]')` / `GetView('["Value"]')`.
 - Float no-data is `1.17549435e-38` (converted to NaN); integer no-data is `-2147483648`.
+- GA does not store a channel's trailing no-data values: a `Data` array can be
+  shorter than the object's vertex/cell count. `reader.read_channel(..., length)`
+  pads it with no-data (`no_data_fill`), as geoh5py does.
 - Some files have no `/Objects` group at all (e.g. drillhole-only files).
 - GA display settings: the data channel GA shows has `Visible = 1` (one per object).
   `Color map` values are data values with GA's linear/equal-area mapping already

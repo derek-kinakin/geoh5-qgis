@@ -258,7 +258,10 @@ def _build_layers(
             raise ValueError(f"Grid2D {name!r} has no matching numeric cell data")
         return [
             grid2d_layer(
-                f"{name}: {info.name}", frame, read_channel(workspace, info), crs
+                f"{name}: {info.name}",
+                frame,
+                read_channel(workspace, info, frame.u_count * frame.v_count),
+                crs,
             )
             for info in infos
         ]

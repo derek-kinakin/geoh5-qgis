@@ -26,7 +26,6 @@ from osgeo import gdal
 
 from geoh5_qgis.reader import (
     CONCATENATED_IDS,
-    INTEGER_NDV,
     DataChannel,
     DataInfo,
     Workspace,
@@ -37,6 +36,7 @@ from geoh5_qgis.reader import (
     _is_drillhole_group,
     find_data_type,
     make_channel,
+    no_data_fill,
 )
 
 CONCATENATED_DATA = "Concatenated Data"
@@ -462,20 +462,11 @@ def _table_channel(
 def _stack_column(
     parts: list[tuple[int, np.ndarray | None]], primitive: str
 ) -> np.ndarray:
-    """Concatenate holes' stored values, filling holes without them with no-data.
-
-    Integers are widened to int64 so INTEGER_NDV fits even for unsigned keys.
-    """
+    """Concatenate holes' stored values, filling holes without them with no-data
+    (see reader.no_data_fill)."""
     present = [p for _, p in parts if p is not None]
     kind = present[0].dtype.kind if present else "f"
-    if kind in "OSU":
-        dtype, fill = object, None
-    elif kind == "f":
-        dtype, fill = np.float64, np.nan
-    elif primitive == "Boolean":
-        dtype, fill = np.int64, 0
-    else:
-        dtype, fill = np.int64, INTEGER_NDV
+    dtype, fill = no_data_fill(kind, primitive)
     return np.concatenate(
         [
             np.asarray(p).astype(dtype) if p is not None else np.full(n, fill, dtype)

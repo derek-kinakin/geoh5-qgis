@@ -32,6 +32,7 @@ from conftest import (
     SHADED_VERTEX_VALUES,
     SURFACE_CELLS,
     SURFACE_VERTICES,
+    TRIMMED_KEEP,
     TYPED_FLAGS,
     TYPED_UNITS,
 )
@@ -149,6 +150,19 @@ def test_referenced_grid2d_channel_is_an_int32_raster(channels_file: Path) -> No
         assert band.GetDescription() == "zone"
         assert band.DataType == gdal.GDT_Int32
         assert set(np.unique(dataset.ReadAsArray())) == {1, 2}
+
+
+def test_grid2d_channel_with_trimmed_no_data_tail_loads(trimmed_file: Path) -> None:
+    # GA omits a channel's trailing no-data; the missing cells become no-data.
+    layer = load_object_layer(trimmed_file, uid_of(trimmed_file, "zones"))
+    assert isinstance(layer, QgsRasterLayer)
+    with gdal.ExceptionMgr(useExceptions=True):
+        dataset = gdal.Open(layer.source())
+        band = dataset.GetRasterBand(1)
+        values = band.ReadAsArray()
+    no_data = values == band.GetNoDataValue()
+    assert no_data.sum() == values.size - TRIMMED_KEEP
+    assert sorted(values[~no_data].tolist()) == [1, 2]
 
 
 def test_layer_records_its_geoh5_source(geoh5_file: Path) -> None:

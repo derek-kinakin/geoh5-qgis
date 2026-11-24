@@ -18,6 +18,7 @@ from conftest import (
     SAMPLE_FILE,
     SURFACE_CELLS,
     SURFACE_VERTICES,
+    TRIMMED_KEEP,
     TYPED_COLOR_MAP,
     TYPED_FLAGS,
     TYPED_FLOATS,
@@ -25,6 +26,7 @@ from conftest import (
     TYPED_UNITS,
 )
 from geoh5_qgis.reader import (
+    INTEGER_NDV,
     Grid2DFrame,
     is_horizontal,
     list_data,
@@ -353,6 +355,20 @@ def test_read_channels_type_metadata(channels_file: Path) -> None:
     assert channels["rock"].value_map == ROCK_VALUE_MAP
     # Booleans carry a False/True value map in the file; only Referenced uses it.
     assert channels["flag"].value_map is None
+
+
+def test_read_channels_pads_trimmed_trailing_no_data(trimmed_file: Path) -> None:
+    channels = typed_channels(trimmed_file)
+    pad = len(POINT_VERTICES) - TRIMMED_KEEP
+    np.testing.assert_array_equal(
+        channels["au"].values, [*TYPED_FLOATS[:TRIMMED_KEEP], *[np.nan] * pad]
+    )
+    ndv = [INTEGER_NDV] * pad
+    assert channels["count"].values.tolist() == [*TYPED_INTS[:TRIMMED_KEEP], *ndv]
+    assert channels["rock"].values.tolist() == [*POINT_ROCK_KEYS[:TRIMMED_KEEP], *ndv]
+    assert channels["flag"].values.tolist() == [True, False, False, False]
+    assert channels["note"].values.tolist() == [*POINT_TEXT[:TRIMMED_KEEP], None, None]
+    assert np.isnat(channels["when"].values).tolist() == [False, False, True, True]
 
 
 def test_read_channels_skips_other_associations(channels_file: Path) -> None:

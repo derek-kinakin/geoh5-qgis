@@ -368,7 +368,7 @@ def read_channels(
         if info.association == association
         and info.primitive_type in ATTRIBUTE_PRIMITIVES
     ]
-    channels = [read_channel(workspace, info) for info in infos]
+    channels = [read_channel(workspace, info, length) for info in infos]
     return [c for c in channels if c.values.shape == (length,)]
 
 
@@ -395,12 +395,19 @@ def raster_channels(workspace: Workspace, object_uid: str) -> list[DataInfo]:
     ]
 
 
-def read_channel(workspace: Workspace, info: DataInfo) -> DataChannel:
+def read_channel(
+    workspace: Workspace, info: DataInfo, length: int | None = None
+) -> DataChannel:
     """Read one data channel with its units, value map and colour map.
+
+    GEOSCIENCE ANALYST does not store a channel's trailing no-data values, so
+    with ``length`` a shorter array is padded with no-data to that length.
 
     Args:
         workspace: Project group from open_workspace().
         info: The channel, from list_data().
+        length: Number of values the object expects (vertices or cells), or
+            None to return the values as stored.
 
     Returns:
         The channel (see DataChannel for how values are typed).
@@ -410,7 +417,48 @@ def read_channel(workspace: Workspace, info: DataInfo) -> DataChannel:
     """
     data = _data(workspace, info.uid)
     data_type = data.OpenGroup("Type") if "Type" in _groups(data) else None
-    return make_channel(info, read_data_values(workspace, info.uid), data_type)
+    values = read_data_values(workspace, info.uid)
+    if length is not None and len(values) < length:
+        values = pad_no_data(values, length, info.primitive_type)
+    return make_channel(info, values, data_type)
+
+
+def pad_no_data(values: np.ndarray, length: int, primitive_type: str) -> np.ndarray:
+    """Pad stored values with no-data up to ``length``.
+
+    Args:
+        values: Values as stored (float no-data already NaN).
+        length: The wanted number of values (at least len(values)).
+        primitive_type: The channel's geoh5 primitive type.
+
+    Returns:
+        The values followed by no-data (see no_data_fill).
+    """
+    dtype, fill = no_data_fill(values.dtype.kind, primitive_type)
+    tail = np.full(length - len(values), fill, dtype)
+    return np.concatenate([np.asarray(values).astype(dtype), tail])
+
+
+def no_data_fill(kind: str, primitive_type: str) -> tuple[type, object]:
+    """The dtype and no-data value used to fill missing values of a channel.
+
+    Integers are widened to int64 so INTEGER_NDV fits even for unsigned keys.
+
+    Args:
+        kind: numpy dtype kind of the stored values.
+        primitive_type: The channel's geoh5 primitive type.
+
+    Returns:
+        (dtype, fill): None for text, NaN for floats, 0 (False) for Boolean and
+        INTEGER_NDV for other integers.
+    """
+    if kind in "OSU":
+        return object, None
+    if kind == "f":
+        return np.float64, np.nan
+    if primitive_type == "Boolean":
+        return np.int64, 0
+    return np.int64, INTEGER_NDV
 
 
 def make_channel(
